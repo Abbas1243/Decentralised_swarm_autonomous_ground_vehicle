@@ -1,0 +1,19 @@
+{
+  mode: "peer",
+  connect: {
+    endpoints: [],
+  },
+  listen: {
+    endpoints: ["udp/224.0.0.224:7447"],
+  },
+  scouting: {
+    multicast: {
+      enabled: true,
+      address: "224.0.0.224:7447",
+      interface: "auto",
+    },
+    gossip: {
+      enabled: true,
+    },
+  },
+}

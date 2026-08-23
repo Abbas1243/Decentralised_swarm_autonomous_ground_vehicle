@@ -1,0 +1,295 @@
+<?xml version="1.0"?>
+<robot name="swarm_bot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ==================== NAMESPACE ARGUMENT ==================== -->
+  <xacro:arg name="robot_namespace" default="robot_1"/>
+
+  <!-- ==================== PROPERTIES ==================== -->
+  <xacro:property name="ns" value="$(arg robot_namespace)"/>
+  <xacro:property name="chassis_length" value="0.25"/>
+  <xacro:property name="chassis_width" value="0.20"/>
+  <xacro:property name="chassis_height" value="0.08"/>
+  <xacro:property name="wheel_radius" value="0.035"/>
+  <xacro:property name="wheel_width" value="0.03"/>
+  <xacro:property name="wheelbase" value="0.22"/>
+  <xacro:property name="chassis_mass" value="1.5"/>
+  <xacro:property name="wheel_mass" value="0.1"/>
+
+  <!-- ==================== BASE FOOTPRINT ==================== -->
+  <link name="${ns}/base_footprint"/>
+
+  <joint name="${ns}/base_footprint_joint" type="fixed">
+    <parent link="${ns}/base_footprint"/>
+    <child link="${ns}/base_link"/>
+    <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ==================== CHASSIS ==================== -->
+  <link name="${ns}/base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.2 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="${chassis_length} ${chassis_width} ${chassis_height}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="${chassis_mass}"/>
+      <inertia
+        ixx="${chassis_mass*(chassis_width*chassis_width + chassis_height*chassis_height)/12}"
+        ixy="0" ixz="0"
+        iyy="${chassis_mass*(chassis_length*chassis_length + chassis_height*chassis_height)/12}"
+        iyz="0"
+        izz="${chassis_mass*(chassis_length*chassis_length + chassis_width*chassis_width)/12}"/>
+    </inertial>
+  </link>
+
+  <!-- ==================== LEFT WHEEL ==================== -->
+  <link name="${ns}/left_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="${wheel_mass}"/>
+      <inertia
+        ixx="${wheel_mass*(3*wheel_radius*wheel_radius + wheel_width*wheel_width)/12}"
+        ixy="0" ixz="0"
+        iyy="${wheel_mass*(3*wheel_radius*wheel_radius + wheel_width*wheel_width)/12}"
+        iyz="0"
+        izz="${wheel_mass*wheel_radius*wheel_radius/2}"/>
+    </inertial>
+  </link>
+
+  <joint name="${ns}/left_wheel_joint" type="continuous">
+    <parent link="${ns}/base_link"/>
+    <child link="${ns}/left_wheel"/>
+    <origin xyz="0 ${wheelbase/2} ${-chassis_height/2}" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ==================== RIGHT WHEEL ==================== -->
+  <link name="${ns}/right_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="${wheel_mass}"/>
+      <inertia
+        ixx="${wheel_mass*(3*wheel_radius*wheel_radius + wheel_width*wheel_width)/12}"
+        ixy="0" ixz="0"
+        iyy="${wheel_mass*(3*wheel_radius*wheel_radius + wheel_width*wheel_width)/12}"
+        iyz="0"
+        izz="${wheel_mass*wheel_radius*wheel_radius/2}"/>
+    </inertial>
+  </link>
+
+  <joint name="${ns}/right_wheel_joint" type="continuous">
+    <parent link="${ns}/base_link"/>
+    <child link="${ns}/right_wheel"/>
+    <origin xyz="0 ${-wheelbase/2} ${-chassis_height/2}" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ==================== CASTER FRONT ==================== -->
+  <link name="${ns}/caster_front">
+    <visual>
+      <geometry>
+        <sphere radius="${wheel_radius/2}"/>
+      </geometry>
+      <material name="grey">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="${wheel_radius/2}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0"
+               iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <joint name="${ns}/caster_front_joint" type="fixed">
+    <parent link="${ns}/base_link"/>
+    <child link="${ns}/caster_front"/>
+    <origin xyz="${chassis_length/2 - 0.03} 0 ${-chassis_height/2 - wheel_radius/2}"/>
+  </joint>
+
+  <!-- ==================== CASTER REAR ==================== -->
+  <link name="${ns}/caster_rear">
+    <visual>
+      <geometry>
+        <sphere radius="${wheel_radius/2}"/>
+      </geometry>
+      <material name="grey">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <sphere radius="${wheel_radius/2}"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0"
+               iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <joint name="${ns}/caster_rear_joint" type="fixed">
+    <parent link="${ns}/base_link"/>
+    <child link="${ns}/caster_rear"/>
+    <origin xyz="${-(chassis_length/2 - 0.03)} 0 ${-chassis_height/2 - wheel_radius/2}"/>
+  </joint>
+
+  <!-- ==================== LIDAR ==================== -->
+  <link name="${ns}/lidar_link">
+    <visual>
+      <geometry>
+        <cylinder radius="0.04" length="0.04"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder radius="0.04" length="0.04"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.17"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0"
+               iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+
+  <joint name="${ns}/lidar_joint" type="fixed">
+    <parent link="${ns}/base_link"/>
+    <child link="${ns}/lidar_link"/>
+    <origin xyz="0.05 0 ${chassis_height/2 + 0.02}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ==================== GAZEBO MATERIALS ==================== -->
+  <gazebo reference="${ns}/base_link">
+    <material>Gazebo/Blue</material>
+  </gazebo>
+
+  <gazebo reference="${ns}/left_wheel">
+    <material>Gazebo/Black</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+
+  <gazebo reference="${ns}/right_wheel">
+    <material>Gazebo/Black</material>
+    <mu1>1.0</mu1>
+    <mu2>1.0</mu2>
+  </gazebo>
+
+  <gazebo reference="${ns}/caster_front">
+    <material>Gazebo/Grey</material>
+    <mu1>0.0</mu1>
+    <mu2>0.0</mu2>
+  </gazebo>
+
+  <gazebo reference="${ns}/caster_rear">
+    <material>Gazebo/Grey</material>
+    <mu1>0.0</mu1>
+    <mu2>0.0</mu2>
+  </gazebo>
+
+  <!-- ==================== DIFFERENTIAL DRIVE PLUGIN ==================== -->
+  <gazebo>
+    <plugin name="differential_drive_controller"
+            filename="libgazebo_ros_diff_drive.so">
+      <update_rate>30</update_rate>
+      <left_joint>${ns}/left_wheel_joint</left_joint>
+      <right_joint>${ns}/right_wheel_joint</right_joint>
+      <wheel_separation>${wheelbase}</wheel_separation>
+      <wheel_diameter>${2*wheel_radius}</wheel_diameter>
+      <max_wheel_torque>20</max_wheel_torque>
+      <max_wheel_acceleration>1.0</max_wheel_acceleration>
+      <command_topic>${ns}/cmd_vel</command_topic>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>false</publish_wheel_tf>
+      <odometry_frame>${ns}/odom</odometry_frame>
+      <robot_base_frame>${ns}/base_footprint</robot_base_frame>
+    </plugin>
+  </gazebo>
+
+  <!-- ==================== LIDAR PLUGIN ==================== -->
+  <gazebo reference="${ns}/lidar_link">
+    <sensor name="lidar" type="ray">
+      <always_on>true</always_on>
+      <visualize>true</visualize>
+      <update_rate>5.5</update_rate>
+      <ray>
+        <scan>
+          <horizontal>
+            <samples>360</samples>
+            <resolution>1</resolution>
+            <min_angle>-3.14159</min_angle>
+            <max_angle>3.14159</max_angle>
+          </horizontal>
+        </scan>
+        <range>
+          <min>0.15</min>
+          <max>6.0</max>
+          <resolution>0.01</resolution>
+        </range>
+        <noise>
+          <type>gaussian</type>
+          <mean>0.0</mean>
+          <stddev>0.01</stddev>
+        </noise>
+      </ray>
+      <plugin name="scan" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <namespace>/${ns}</namespace>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>${ns}/lidar_link</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>
