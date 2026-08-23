@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "Custom_board") (type "KiCad") (uri "C:/Users/SHRAVN/OneDrive/Documents/pcb/new_pcb/Custom_board") (options "") (descr ""))
+)
