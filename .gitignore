@@ -1,7 +1,11 @@
+__pycache__/
+*.pyc
+*.so
+.vscode/
+.idea/
+*.log
 build/
-install/
-log/
-src/build/
-src/install/
-src/log/
-*.zip
+
+# vendor SDK binaries — not part of the project's own work
+software/simulation/LiDAR/rplidar_sdk-master/bonjour.zip
+software/simulation/LiDAR/rplidar_sdk-master/tools/cp2102_driver/CP210x_Windows_Drivers.zip
