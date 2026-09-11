@@ -249,7 +249,8 @@ def solve_soft_pose_step(scan_features, static_lines, static_arcs):
 
     Returns
     -------
-    (dx, dy, dtheta, total_weight, min_eigenvalue)
+    (dx, dy, dtheta, total_weight, min_eigenvalue, rotation_information,
+     total_line_weight, a11, a12, a22)
         dx, dy, dtheta : the GN correction for this iteration, to be
             applied to working_pose exactly like solve_pose_step's output.
         total_weight : sum of all weights that contributed (lines + arcs) --
@@ -263,12 +264,43 @@ def solve_soft_pose_step(scan_features, static_lines, static_arcs):
             "translation poorly constrained along some direction", same
             role pose_estimator.check_angular_diversity played for the
             hard-match path.
+        rotation_information : length of the weighted (sin_sum, cos_sum)
+            resultant vector from the rotation pass -- the rotation-axis
+            analogue of min_eigenvalue's translation conditioning. High
+            when many weighted line pairs agree on rotation direction
+            (confident dtheta), low when they scatter/cancel (dtheta is
+            noise-dominated even if it happens to look small). Scales with
+            feature COUNT as well as agreement quality -- divide by
+            total_line_weight (below) to get a feature-count-independent
+            [0,1] confidence (the circular-statistics "resultant length" R)
+            before comparing against a fixed threshold across scans with
+            different numbers of features.
+        total_line_weight : sum of LINE-only weights that contributed to
+            the rotation pass (excludes arc weight, since arcs never
+            contribute to rotation -- see module docstring). This is the
+            correct denominator for normalising rotation_information; using
+            combined total_weight instead would dilute the ratio whenever
+            arcs are present without arcs having contributed anything to
+            rotation_information's numerator.
+        a11, a12, a22 : the accumulated translation normal-equations matrix
+            entries themselves (symmetric 2x2: [[a11,a12],[a12,a22]]),
+            exposed raw so a caller can maintain its own EMA over the
+            evidence and recompute _min_eigenvalue_2x2 on the DECAYED
+            matrix rather than decaying min_eigenvalue as a scalar --
+            decaying the matrix first is the more correct order (matches
+            how information matrices are meant to accumulate) and is
+            cheap since it's already a fixed 3-scalar system. Divide the
+            resulting eigenvalue by total_weight (or its own decayed
+            average) for the same feature-count-independent normalisation
+            described above, applied to translation conditioning instead
+            of rotation agreement.
     """
     # ---- Pass 1: rotation only needs the weighted circular mean, which
     #      does not depend on dtheta itself -- compute it first in its own
     #      cheap pass (line pairs only; arcs never contribute to rotation).
     sin_sum = 0.0
     cos_sum = 0.0
+    total_line_weight = 0.0
 
     for feat in scan_features:
         if feat.get("type") != "line":
@@ -282,8 +314,31 @@ def solve_soft_pose_step(scan_features, static_lines, static_arcs):
             d = entry.angle - norm_angle
             sin_sum += weight * math.sin(d)
             cos_sum += weight * math.cos(d)
+            total_line_weight += weight
 
     dtheta = 0.0 if (sin_sum == 0.0 and cos_sum == 0.0) else math.atan2(sin_sum, cos_sum)
+
+    # Resultant-vector length of the weighted (sin_sum, cos_sum) pair --
+    # high when many weighted line pairs agree on rotation direction, low
+    # when they scatter/cancel. This is the rotation-axis analogue of
+    # min_eigenvalue's translation-conditioning role below; both are
+    # returned so a caller can maintain a decayed confidence over scans
+    # (see slam.py) instead of trusting one scan's value in isolation.
+    #
+    # total_line_weight is ALSO returned (see Returns docstring) so a
+    # caller can compute a WEIGHT-NORMALISED confidence signal --
+    # rotation_information / total_line_weight is the classic circular
+    # statistics "resultant length" R, bounded in [0,1] regardless of how
+    # many line pairs contributed (1.0 = perfect agreement, 0.0 = uniform
+    # scatter). Raw rotation_information alone scales with feature COUNT
+    # as much as with agreement QUALITY -- a sparse 3-feature scan and a
+    # dense 30-feature scan are not comparable on that raw scale, which
+    # is exactly the confusion a fixed absolute threshold on the raw
+    # value would run into (see slam.py's CONFIDENCE_EMA_ALPHA docstring
+    # for the concrete case this was caught on). The normalised R value
+    # is feature-count-independent and is what slam.py's gain ramps
+    # should be calibrated against instead.
+    rotation_information = math.hypot(sin_sum, cos_sum)
 
     # ---- Pass 2: translation normal equations + total_weight, lines
     #      (post-rotation residual) + arcs (direct isotropic centre
@@ -332,7 +387,8 @@ def solve_soft_pose_step(scan_features, static_lines, static_arcs):
     dx, dy = _solve_2x2(a11, a12, a12, a22, b1, b2)
     min_eigenvalue = _min_eigenvalue_2x2(a11, a12, a22)
 
-    return dx, dy, dtheta, total_weight, min_eigenvalue
+    return (dx, dy, dtheta, total_weight, min_eigenvalue, rotation_information,
+            total_line_weight, a11, a12, a22)
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +418,7 @@ if __name__ == "__main__":
     true_dtheta = 0.03
     map_e = [_ME(angle=0.0, distance=1.0, mx=0.0, my=1.0)]
     scan_f = [_line_feat(-true_dtheta, 1.0)]   # scan sees it rotated by -dtheta
-    dx, dy, dtheta, w, eig = solve_soft_pose_step(scan_f, map_e, [])
+    dx, dy, dtheta, w, eig, *_ = solve_soft_pose_step(scan_f, map_e, [])
     assert w > MIN_TOTAL_WEIGHT, f"T1 expected confident weight, got {w}"
     assert abs(dtheta - true_dtheta) < 1e-3, f"T1 dtheta off: {dtheta} vs {true_dtheta}"
     print(f"  T1 PASS  single clean pair: dtheta={dtheta:.4f} (true={true_dtheta:.4f}) weight={w:.3f}")
@@ -385,8 +441,8 @@ if __name__ == "__main__":
     # pose) -- both should pull dtheta toward the SAME sign, not flip.
     scan_a = [_line_feat(0.02, 1.02)]
     scan_b = [_line_feat(0.01, 1.01)]
-    dxA, dyA, dthetaA, wA, eigA = solve_soft_pose_step(scan_a, map_e2, [])
-    dxB, dyB, dthetaB, wB, eigB = solve_soft_pose_step(scan_b, map_e2, [])
+    dxA, dyA, dthetaA, wA, eigA, *_ = solve_soft_pose_step(scan_a, map_e2, [])
+    dxB, dyB, dthetaB, wB, eigB, *_ = solve_soft_pose_step(scan_b, map_e2, [])
     assert (dthetaA >= 0) == (dthetaB >= 0), \
         f"T2 FLIP-FLOP: dthetaA={dthetaA:.4f} dthetaB={dthetaB:.4f} changed sign"
     assert (dyA >= 0) == (dyB >= 0), \
@@ -406,12 +462,12 @@ if __name__ == "__main__":
         _line_feat(0.0, -1.0 - 0.20),
     ]
     scan_arc3 = [_arc_feat(0.5 - 0.20, 0.5, 0.5)]
-    dx3, dy3, dtheta3, w3, eig3 = solve_soft_pose_step(scan_f3 + scan_arc3, map_e3, arc_e3)
+    dx3, dy3, dtheta3, w3, eig3, *_ = solve_soft_pose_step(scan_f3 + scan_arc3, map_e3, arc_e3)
     assert abs(dx3 - 0.20) < 1e-2, f"T3 dx should be recovered via arc constraint: {dx3}"
     print(f"  T3 PASS  parallel-wall ambiguity resolved by soft arc constraint: dx={dx3:.4f}")
 
     # -- T4: no nearby static features -> low confidence, caller should skip
-    dx4, dy4, dtheta4, w4, eig4 = solve_soft_pose_step(
+    dx4, dy4, dtheta4, w4, eig4, *_ = solve_soft_pose_step(
         [_line_feat(0.0, 1.0)], [_ME(angle=1.4, distance=5.0, mx=5.0, my=0.0)], []
     )
     assert w4 < MIN_TOTAL_WEIGHT, f"T4 expected low confidence weight, got {w4}"
@@ -428,17 +484,78 @@ if __name__ == "__main__":
         _ME(angle=0.02, distance=1.5, mx=0.0, my=1.5),   # nearly parallel to the first
     ]
     scan_f5 = [_line_feat(0.0, 1.0), _line_feat(0.02, 1.5)]
-    _, _, _, _, eig5_no_arc = solve_soft_pose_step(scan_f5, map_e5, [])
+    _, _, _, _, eig5_no_arc, *_ = solve_soft_pose_step(scan_f5, map_e5, [])
     assert eig5_no_arc < MIN_EIGENVALUE_THRESHOLD, \
         f"T5 expected near-parallel walls alone to be poorly conditioned, got {eig5_no_arc}"
 
     arc_e5 = [_ME(angle=-10.0, distance=0.4, mx=0.3, my=0.3)]
     scan_arc5 = [_arc_feat(0.3, 0.3, 0.4)]
-    _, _, _, _, eig5_with_arc = solve_soft_pose_step(scan_f5 + scan_arc5, map_e5, arc_e5)
+    _, _, _, _, eig5_with_arc, *_ = solve_soft_pose_step(scan_f5 + scan_arc5, map_e5, arc_e5)
     assert eig5_with_arc > eig5_no_arc, \
         f"T5 expected the arc to raise the min eigenvalue: {eig5_with_arc} vs {eig5_no_arc}"
     print(f"  T5 PASS  conditioning check: near-parallel walls alone eig={eig5_no_arc:.4f} "
           f"(< threshold {MIN_EIGENVALUE_THRESHOLD}), with arc eig={eig5_with_arc:.4f}")
+
+    # -- T6: rotation_information -- high when weighted line pairs agree on
+    #        rotation direction, low when they scatter/cancel. Also checks
+    #        the raw a11/a12/a22 pass through faithfully into
+    #        _min_eigenvalue_2x2, and that total_line_weight correctly
+    #        normalises rotation_information into a feature-count-
+    #        independent [0,1] confidence (the classic circular-statistics
+    #        resultant length R) -- these are the fields slam.py's EMA
+    #        confidence decay consumes directly (see CONFIDENCE_EMA_ALPHA).
+    map_e6 = [_ME(angle=0.0, distance=1.0, mx=0.0, my=1.0)]
+
+    # Two scan features, both cleanly agreeing on the same small rotation.
+    scan_f6_agree = [_line_feat(0.03, 1.0), _line_feat(0.03, 1.0)]
+    _, _, _, _, _, rot_info_agree, line_w_agree, a11_a, a12_a, a22_a = solve_soft_pose_step(
+        scan_f6_agree, map_e6, []
+    )
+
+    # One feature pulling +dtheta, one pulling -dtheta by the same amount
+    # against a SECOND, differently-angled wall -- rotation evidence should
+    # partially cancel, giving lower rotation_information despite similar
+    # total weight.
+    map_e6b = [
+        _ME(angle=0.0, distance=1.0, mx=0.0, my=1.0),
+        _ME(angle=math.pi / 2, distance=1.0, mx=1.0, my=0.0),
+    ]
+    scan_f6_cancel = [_line_feat(0.05, 1.0), _line_feat(math.pi / 2 - 0.05, 1.0)]
+    _, _, _, _, _, rot_info_cancel, line_w_cancel, *_ = solve_soft_pose_step(
+        scan_f6_cancel, map_e6b, []
+    )
+
+    assert rot_info_agree > 0.0, f"T6 expected positive rotation_information, got {rot_info_agree}"
+    assert rot_info_agree > rot_info_cancel, (
+        f"T6 expected agreeing rotation evidence ({rot_info_agree:.4f}) to score higher "
+        f"than opposing evidence ({rot_info_cancel:.4f})"
+    )
+
+    # NORMALISED confidence (R = rotation_information / total_line_weight,
+    # bounded [0,1]) must separate agree/cancel MORE clearly than the raw
+    # values alone, and must not exceed 1.0 (a sanity bound on R itself).
+    norm_agree = rot_info_agree / line_w_agree
+    norm_cancel = rot_info_cancel / line_w_cancel
+    assert norm_agree <= 1.0 + 1e-9, f"T6 normalised R must be <= 1.0, got {norm_agree}"
+    assert norm_cancel <= 1.0 + 1e-9, f"T6 normalised R must be <= 1.0, got {norm_cancel}"
+    assert norm_agree > norm_cancel, (
+        f"T6 normalised agreement ({norm_agree:.4f}) must exceed normalised "
+        f"cancellation ({norm_cancel:.4f})"
+    )
+
+    # a11/a12/a22 must reproduce the same min_eigenvalue as the function's
+    # own internal computation -- confirms the raw matrix entries returned
+    # are the exact ones used internally, not a stale/separate copy.
+    recomputed_eig = _min_eigenvalue_2x2(a11_a, a12_a, a22_a)
+    _, _, _, _, eig_direct, *_ = solve_soft_pose_step(scan_f6_agree, map_e6, [])
+    assert abs(recomputed_eig - eig_direct) < 1e-9, (
+        f"T6 a11/a12/a22 must reproduce the same min_eigenvalue: "
+        f"{recomputed_eig} vs {eig_direct}"
+    )
+    print(f"  T6 PASS  rotation_information distinguishes agreeing ({rot_info_agree:.4f}) "
+          f"from cancelling ({rot_info_cancel:.4f}) evidence; normalised R "
+          f"(agree={norm_agree:.4f}, cancel={norm_cancel:.4f}) separates them more clearly; "
+          f"a11/a12/a22 reproduce min_eigenvalue exactly")
 
     print()
     print("All tests passed.")

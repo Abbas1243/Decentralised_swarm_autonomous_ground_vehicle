@@ -507,26 +507,7 @@ class LidarNode(Node):
             pose, match_result, pose_delta, delta_applied = self._slam.process_scan(
                 lines, scan_idx=self._scan_idx
             )
-            if self._slam.last_pose_frozen:
-                # POSE FROZEN — see slam.py's MAX_UNTRUSTED_STREAK
-                # docstring. The delta was magnitude-plausible but
-                # withheld from current_pose entirely because too many
-                # consecutive untrustworthy (off-trend/ambiguous) scans
-                # have accumulated in a row — same "not enough
-                # trustworthy information" treatment as too-few-matches,
-                # just triggered by sustained distrust instead. Both pose
-                # AND map are unchanged this scan; this is the strongest
-                # of the three warning levels below (checked first) since
-                # it means the system has declared itself lost, not just
-                # cautious.
-                self.get_logger().warn(
-                    f"Scan#{self._scan_idx}  POSE FROZEN (streak="
-                    f"{self._slam._untrusted_streak}): withholding delta "
-                    f"dx={pose_delta.dx:+.3f} dy={pose_delta.dy:+.3f} "
-                    f"dtheta={math.degrees(pose_delta.dtheta):+.1f}° — pose/map "
-                    f"unchanged, waiting for a trustworthy match to recover"
-                )
-            elif pose_delta.valid and not delta_applied:
+            if pose_delta.valid and not delta_applied:
                 # pose_estimator solved a transform for its matched pairs,
                 # but the result implied an implausible per-scan jump —
                 # most often caused by degraded scan data (occlusion,
@@ -595,9 +576,7 @@ class LidarNode(Node):
                 f"fine_total=({self._slam.last_fine_total_dx:+.3f},{self._slam.last_fine_total_dy:+.3f},"
                 f"{math.degrees(self._slam.last_fine_total_dtheta):+.1f}deg) "
                 f"final_weight={self._slam.last_final_total_weight:.3f} "
-                f"final_eig={self._slam.last_final_min_eigenvalue:.4f} "
-                f"untrusted_streak={self._slam._untrusted_streak} "
-                f"pose_frozen={self._slam.last_pose_frozen}",
+                f"final_eig={self._slam.last_final_min_eigenvalue:.4f}",
                 throttle_duration_sec=1.0,
             )
 

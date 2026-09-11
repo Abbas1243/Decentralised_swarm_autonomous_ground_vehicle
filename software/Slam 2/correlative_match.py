@@ -1,119 +1,101 @@
 """
 correlative_match.py
 =====================
-Multi-resolution correlative (search-and-score) coarse pose estimation over
-LINE and ARC features. Runs BEFORE line_matcher's hard-correspondence
-matching, to solve the chicken-and-egg problem documented in slam.py /
-pose_estimator.py: hard correspondence (line_matcher) can only be trusted
-once the pose guess is already close; but the pose guess only gets better
-by trusting some correspondence. Correlative search breaks that loop by
-never committing to a single correspondence at all -- it scores many
-candidate poses against the WHOLE feature set at once (smooth, soft
-scoring) and returns whichever candidate pose makes the scan agree best
-with the map, globally.
+Correlative (search-and-score) coarse pose estimation over LINE and ARC
+features. Runs BEFORE line_matcher's hard-correspondence matching, to solve
+the chicken-and-egg problem documented in slam.py / pose_estimator.py:
+hard correspondence (line_matcher) can only be trusted once the pose guess
+is already close; but the pose guess only gets better by trusting some
+correspondence. Correlative search breaks that loop by never committing to
+a single correspondence at all -- it scores many candidate poses against
+the WHOLE feature set at once (smooth, soft scoring) and returns whichever
+candidate pose makes the scan agree best with the map, globally.
 
 This is the feature-space analogue of Hector/Cartographer's real-time
 correlative scan matcher, scored on compact Hough (line) and centre+radius
 (arc) parameters instead of a stored occupancy grid or point cloud --
 zero extra RAM, no grid, plain scalar arithmetic only.
 
-GUESS TRANSLATION BUG (FIXED) -- READ THIS IF TOUCHING SCORING CODE
+TWO-LAYER SEARCH -- WHY THIS EXISTS
 ------------------------------------------------------------------------
-Every candidate pose search() scores is (guess_x + dx, guess_y + dy,
-guess_theta + dtheta) -- search()'s own docstring says so explicitly. But
-the line-scoring code in _score_grid_vectorized (and the dead scalar
-reference path, _score_candidate) computed each candidate line's Hough
-distance as `base_dist + nx*dx + ny*dy` -- guess_x/guess_y were NEVER
-added in. Same omission for arc centres (`rcx + dx` instead of
-`rcx + guess_x + dx`). This is silently correct only when guess_x==
-guess_y==0.0 -- exactly the only case every self-test in this file
-exercised (T1-T7 below all call search() with guess_x=0.0, guess_y=0.0),
-which is why nothing caught it.
+A single flat exhaustive sweep over one fixed-size window has two problems
+that showed up directly on real hardware logs:
 
-CONSEQUENCE ON HARDWARE: as soon as the robot's real pose moved away from
-the map origin, every candidate's line/arc distance was scored against
-the wrong absolute reference frame by an amount equal to however far
-guess_x/guess_y actually were from zero. Once that error approached
-SIGMA_DIST_M/SIGMA_CENTRE_M (0.15m), scores collapsed map-wide
-(final_weight/final_eig -> ~0, "poor_conditioning" breaks) -- and because
-the missing offset is roughly CONSTANT for a given guess, the search
-could also lock onto a candidate (dx, dy, dtheta) that happened to
-partially cancel it out: a confidently wrong answer, not just a
-low-confidence one (large coarse_valid=True rotation swings of 30-70
-degrees observed on real logs, correlated with pose.x/pose.y being
-non-trivially far from the map origin, not with how large the robot's
-actual per-scan motion was). Fixed by adding guess_x/guess_y into the
-distance/centre calculations in both _score_grid_vectorized and
-_score_candidate; see T8/T9 below for regression coverage with a nonzero
-guess, which the original test suite never had.
+  1. FIXED WINDOW = FIXED REACH. A window wide enough to catch a fast
+     combined rotate+translate motion is expensive to sweep at fine
+     resolution every scan (cost grows ~step_count^3). Widening the window
+     to chase fast motion means paying that cost on every scan, even slow
+     ones.
 
-MULTI-RESOLUTION PYRAMID -- WHY THIS EXISTS
+  2. PICKING ONLY THE ARGMAX HIDES AMBIGUITY. A room with rectangular
+     symmetry (two facing walls repeated on both axes) can produce a
+     SECOND candidate pose -- e.g. the true pose rotated ~90 degrees --
+     that scores nearly as well as the true one. A flat sweep evaluates
+     both but then THROWS AWAY the comparison and returns only the
+     winner. If noise ever tips the winner to the wrong peak, nothing
+     downstream can tell the difference between "confidently correct"
+     and "narrowly won against an equally plausible wrong answer" --
+     this is exactly what produced an observed ~90 degree pose lock-in
+     that then rebuilt the entire map around the wrong orientation.
+
+FIX -- coarse-to-fine (breadth) + greedy multi-start refinement (reach):
+
+  Layer 1 (breadth): sweep the FULL window at a COARSE, cheap step and
+      keep the top-K distinct scoring candidates instead of just the
+      single winner (see TOP_K_CANDIDATES, _insert_topk_distinct). This
+      is what catches "there's a second, nearly-as-good peak" -- the
+      thing a flat argmax sweep structurally cannot report.
+
+  Layer 2 (reach): independently refine EACH of the K survivors with a
+      small pattern-search / "three-step search"-style walk -- repeatedly
+      sweep a SMALL window centred on the current best point, re-centre
+      on whatever improves the score, stop when a round finds nothing
+      better or MAX_WALK_ROUNDS is reached (see _greedy_refine). This
+      lets a single coarse candidate reach well beyond the coarse grid's
+      own step size cheaply, without paying for a permanently wide fine
+      sweep every scan. Bounded by MAX_WALK_DTHETA_RAD / MAX_WALK_DXY_M
+      measured from the ORIGINAL guess passed into search() -- same
+      "cap the total correction, not the per-step size" philosophy as
+      slam.py's MAX_DELTA_ROTATION_RAD / _clamp_iteration_step -- so an
+      unlucky sequence of local improvements cannot wander arbitrarily
+      far from a trustworthy region.
+
+  After both layers, the two best refined candidates are compared. If
+  they are close (see AMBIGUITY_MARGIN_RATIO), the result is flagged
+  `ambiguous=True` in CoarseResult. dx/dy/dtheta/valid are still returned
+  as before (this is additive, not a new rejection gate) -- callers
+  (slam.py) are expected to treat an ambiguous coarse result the same
+  way they already treat a low-confidence one: apply the pose update but
+  do not trust it enough to author new map evidence until the ambiguity
+  clears on a later scan. This is what closes the "silently locked onto
+  the wrong symmetric peak" failure mode instead of just going faster.
+
+  A single flat exhaustive sweep (K=1, no greedy refinement) is the
+  special case this generalises -- setting TOP_K_CANDIDATES=1 and
+  MAX_WALK_ROUNDS=0 recovers the original behaviour exactly.
+
+WHY NOT BRANCH-AND-BOUND (Cartographer's real method)
 ------------------------------------------------------------------------
-hector_slam's real ScanMatcher (tu-darmstadt-ros-pkg/hector_slam,
-hector_mapping/include/hector_slam_lib/matcher/ScanMatcher.h +
-OccGridMapUtil.h) gets its robustness from two things this module cannot
-literally copy (see PORT PATH / WHY NOT A REAL GRID below), but CAN copy
-the *principle* of: (1) matching against a smooth, continuous cost surface
-instead of committing to discrete correspondences, and (2) searching that
-surface at MULTIPLE RESOLUTIONS -- coarse grid levels first, each one
-refining the next -- rather than a single flat sweep. (1) is already
-covered by this module's Gaussian soft-scoring (see WHY SOFT SCORING
-below); this revision adds (2).
+Branch-and-bound prunes large regions of the search space using a
+provable score upper bound computed from a precomputed multi-resolution
+occupancy grid. It finds the true global optimum touching a small
+fraction of candidates a flat sweep would -- strictly better than the
+two-layer approach here in principle. It is NOT used here because
+computing that bound cheaply requires storing a grid, which is exactly
+the RAM cost slam_build_prompt.md rejected line-feature SLAM to avoid on
+the 512MB Duo S. The two-layer design above never stores a grid -- it is
+a pure CPU-time optimisation over the same flat feature-scoring function
+this module already used, so it costs zero additional RAM.
 
-The previous design here was a two-layer scheme: one coarse exhaustive
-sweep (keeping the top-K distinct peaks), then an independent GREEDY
-pattern-search walk per surviving candidate to reach further / refine
-finer. That greedy walk had two structural weaknesses a true pyramid does
-not have:
-  - It could get stuck in a local uphill direction and stop before finding
-    a better nearby point one step further out (greedy hill-climbing has
-    no guarantee of finding the local optimum within its window, unlike
-    an exhaustive sweep of that window).
-  - Its "reach" (how far it could travel from its coarse starting point)
-    was governed by a SEPARATE set of constants (MAX_WALK_DXY_M /
-    MAX_WALK_DTHETA_RAD) from the coarse sweep's own window
-    (SEARCH_DXY_MAX_M / SEARCH_DTHETA_MAX_RAD) -- two different levers
-    controlling what is conceptually one thing (how far the pose can be
-    corrected this scan), which made total reach harder to reason about
-    and tune, and needed its own dedicated self-test to cover the
-    "coarse window too small, greedy reach saves it" case specifically.
-
-FIX -- true coarse-to-fine PYRAMID (see LEVELS below): the FIRST level
-exhaustively sweeps the full SEARCH_DTHETA_MAX_RAD / SEARCH_DXY_MAX_M
-window at a coarse step, keeping the top-K distinct peaks (unchanged from
-before -- this is what catches "there's a second, nearly-as-good peak"
-that a flat argmax sweep cannot report). EVERY SUBSEQUENT level then
-exhaustively re-sweeps a NARROWER window, at a FINER step, RE-CENTRED on
-each surviving candidate from the level above -- not a greedy walk, a full
-grid sweep of that (now much smaller) window, so nothing is missed within
-it. Each level's window is chosen to comfortably exceed half the previous
-level's step size, guaranteeing no true peak can fall in the gap between
-coarse grid samples and land outside the next level's refinement window
-(see LEVELS' inline comments for the actual margins used). Total reach
-from the original guess is now governed by ONE number -- level 0's own
-window -- since every later level only refines a point level 0 already
-found, never travels further from the original guess than level 0's own
-range plus a small quantization margin. This removes the old two-lever
-reach split entirely.
-
-WHY NOT A REAL GRID (staying feature-based, not switching to occupancy
-grid SLAM)
+WHY NOT BINARY SEARCH
 ------------------------------------------------------------------------
-hector's actual precision and robustness come from matching every scan
-POINT (typically hundreds) against a dense, bilinearly-interpolated
-occupancy grid with true multi-resolution grid levels, solved via Eigen.
-slam_build_prompt.md rejected exactly that architecture for this project
-on Day 0 -- Hector SLAM, SLAM Toolbox, and Cartographer were all named as
-"too heavy for 512MB RISC-V" specifically because of the occupancy-grid
-RAM cost (a 400x400 cell grid at 5cm resolution is 160KB per level times
-however many resolution levels; a vector/line-feature map is ~5KB). Line
-and arc features were chosen specifically to avoid that cost, at the
-acknowledged expense of matching against a much SPARSER, noisier signal
-(a handful of STATIC map entries per scan, not hundreds of points). This
-module borrows hector's coarse-to-fine SEARCH STRATEGY -- which is free,
-it costs zero extra RAM regardless of how many levels are used, since
-every level scores against the same small STATIC line/arc list -- without
-reopening the RAM-driven decision to go feature-based in the first place.
+Binary search assumes a unimodal (single-peak) cost surface so that
+comparing two points tells you which half of the space to discard. The
+score surface here is provably NOT always unimodal (see the rectangular-
+room symmetry case above) -- discarding half the space on that
+assumption would silently throw away the correct peak whenever a
+competing one exists, which is worse than what this module had before,
+not better.
 
 WHY SOFT SCORING INSTEAD OF line_matcher'S HARD THRESHOLDS
 -------------------------------------------------------------
@@ -164,30 +146,28 @@ allowed to author new map evidence (see slam.py's skip_map_update).
 A THIRD, separate signal -- `ambiguous` -- does NOT force valid=False; it
 tells the caller the winning candidate had a close competitor, so the
 delta can still be applied but should not yet be trusted to author new
-map evidence (see slam.py's delta_fully_trusted gating). Ambiguity is
-checked using AMBIGUITY_MIN_SEP_DTHETA_RAD / AMBIGUITY_MIN_SEP_DXY_M -- a
-separation scale tied to the score surface's own physical breadth
-(SIGMA_ANGLE_RAD / SIGMA_DIST_M), NOT to the finest pyramid level's grid
-step. Two refined candidates that both sit on the same broad score-surface
-hilltop, a few cm/degrees apart, are convergence to one peak, not two
-competing peaks -- see AMBIGUITY_MIN_SEP_DTHETA_RAD's docstring for the
-false-positive this distinction fixes.
+map evidence (see slam.py's delta_fully_trusted gating).
 
 PERFORMANCE
 -----------
-Every level's cost follows the same pattern as before: for a fixed
-candidate dtheta, every scan feature is rotated exactly ONCE (cos/sin
-computed once per dtheta step), then the dx,dy sub-sweep at that dtheta is
-pure O(1) scalar arithmetic per feature per static map entry. Level 0
-evaluates the same number of candidates as the old single coarse sweep
-did. Each subsequent level evaluates a NARROWER window at a FINER step,
-once per surviving candidate from the level above (bounded by
-TOP_K_CANDIDATES) -- total candidates across all levels is a small
-constant multiple of level 0's own cost, not an explosion, since window
-size shrinks roughly as fast as step count grows per level (see LEVELS'
-inline sizing comments). Exact costs are tunable via LEVELS below; profile
-on-target (Duo S) before finalising them, same as every other tuning
-constant in this codebase.
+Layer 1 (coarse sweep): for a fixed candidate dtheta, every scan feature
+is rotated exactly ONCE (cos/sin computed once per dtheta step). Sweeping
+the dx,dy sub-grid at that dtheta is then pure O(1) scalar arithmetic per
+feature per candidate -- unchanged from the original single-layer design,
+just run at a coarser step (COARSE_DTHETA_STEP_RAD / COARSE_DXY_STEP_M)
+than before, so the total candidate count is LOWER than the original
+flat fine sweep despite covering the same (or a wider) range.
+
+Layer 2 (greedy refine): each of the K survivors is refined independently
+with a small local window (WALK_WINDOW_DTHETA_RAD / WALK_WINDOW_DXY_M) at
+a finer step, for up to MAX_WALK_ROUNDS rounds, stopping as soon as a
+round finds no improvement. Total candidates evaluated across all K walks
+is bounded and, in the common case (few rounds needed), well under the
+cost of a single flat fine sweep over the original wide range -- while
+still reaching MAX_WALK_DTHETA_RAD / MAX_WALK_DXY_M from the original
+guess, which can exceed the layer-1 window. Exact costs are tunable via
+the constants below; profile on-target (Duo S) before finalising them,
+same as every other tuning constant in this codebase.
 
 PORT PATH
 ---------
@@ -197,140 +177,89 @@ When porting to C (slam_core/correlative_match.c):
                                      float guess_x, float guess_y,
                                      float guess_theta,
                                      CoarseResult *out)
-    LEVELS below become a fixed-size array of #defined struct literals
-    (N_LEVELS is small and known at compile time -- 3 in this revision).
-    _sweep_and_insert()    -> a single fixed-bound triple for-loop
-        (dtheta, dx, dy) reused for EVERY level via an outer
-        `for (level = 0; level < N_LEVELS; level++)` loop -- there is only
-        ONE sweep routine now (the old design needed two: one for the
-        coarse exhaustive sweep, one for the greedy walk). This is
-        actually a SIMPLER C port than the design it replaces.
-    _insert_topk_distinct() -> fixed-size top-K array (K small, e.g. 3),
+    Constants below become #defines in correlative_match.h.
+    _coarse_sweep_topk()   -> fixed-size top-K array (K small, e.g. 3),
         insertion sort in place -- no dynamic allocation, same pattern
         map_manager.c's fixed MAX_MAP_ENTRIES array already uses.
+    _greedy_refine()       -> fixed-bound triple for-loop per round, same
+        no-malloc pattern as every other module in slam_core/.
     No dynamic allocation anywhere -- all loops are fixed-bound; the
     per-dtheta rotated-feature cache is a fixed-size MAX_FEATURES-length
     scratch array reused every dtheta step, exactly as before.
 """
 
 import math
-from collections import namedtuple
+import time
 import numpy as np
+from collections import namedtuple
 
 # ---------------------------------------------------------------------------
-# Search window -- level 0's own range IS the total reach of this module.
-# Every later pyramid level only refines a point level 0 already found, so
-# nothing can end up further from the original guess than this (plus a
-# small quantization margin -- see LEVELS' inline comments). This replaces
-# the old design's SEPARATE greedy-walk reach cap (MAX_WALK_DXY_M /
-# MAX_WALK_DTHETA_RAD) -- there is now exactly one number that controls how
-# far this module can correct the pose in one scan, not two.
+# PERFORMANCE FIX 1 -- static-entry cap (mirrors the fix later applied in
+# the pyramid rewrite of this module, after a confirmed ~15-20x per-scan
+# slowdown was measured once the map reached ~30 STATIC entries: search()
+# cost scales with n_static_entries because EVERY candidate pose scores
+# against EVERY static line/arc -- see _score_candidate's inner loop. Left
+# uncapped, this grows with the map forever. A STATIC entry far from the
+# current pose guess contributes almost nothing to the Gaussian soft-score
+# anyway (SIGMA_DIST_M/SIGMA_CENTRE_M ~ 0.15m falloff), so capping to the
+# nearest MAX_STATIC_ENTRIES_SEARCHED entries loses negligible real signal
+# for what is, physically, always a local search. This was previously
+# MISSING from this two-layer file -- ported over unchanged rather than
+# reinvented, since it is a pure win with no behavioural downside at
+# realistic map sizes (confirmed by T1-T7 below still passing unmodified).
 # ---------------------------------------------------------------------------
-
-SEARCH_DTHETA_MAX_RAD = math.radians(80.0)   # total reach: rotation
-SEARCH_DXY_MAX_M      = 0.30               # total reach: translation
-
-TOP_K_CANDIDATES = 3   # how many DISTINCT peaks survive at EVERY level,
-                        # including the finest. K=1 recovers a plain
-                        # single-winner coarse-to-fine search (no ambiguity
-                        # detection). Cost scales linearly with K at every
-                        # level after the first, since each level refines
-                        # K survivors from the level above.
+MAX_STATIC_ENTRIES_SEARCHED = 70
 
 # ---------------------------------------------------------------------------
-# Multi-resolution pyramid -- each level narrows the window and sharpens
-# the step by roughly the same factor (~5x) going into the next level.
-# SIZING RULE (why nothing gets lost between levels): a level's `dtheta_range`
-# / `dxy_range` must be >= half of the PREVIOUS level's step -- that half-step
-# is the worst-case distance between a true peak and the nearest coarse grid
-# sample that found it, so the next level's window must reach at least that
-# far past its own centre to be guaranteed to still contain the true peak.
-# Every level below keeps comfortable margin above that minimum.
+# Layer 1 -- coarse sweep constants
 # ---------------------------------------------------------------------------
 
-_Level = namedtuple(
-    "_Level",
-    ["dtheta_step", "dxy_step", "dtheta_range", "dxy_range",
-     "min_sep_dtheta", "min_sep_dxy"]
-)
-# dtheta_step, dxy_step   : grid resolution swept AT this level
-# dtheta_range, dxy_range : +/- window swept at this level, RE-CENTRED on
-#                           each surviving candidate from the level above
-#                           (level 0 is centred on the original guess, i.e.
-#                           offset (0,0,0))
-# min_sep_dtheta/dxy      : how close two candidates must be to count as
-#                           the SAME peak at this level (see
-#                           _insert_topk_distinct) -- shrinks at finer
-#                           levels since the window itself has shrunk;
-#                           using a coarse-level separation at a fine
-#                           level would wrongly merge genuinely distinct
-#                           nearby peaks the finer resolution can now tell
-#                           apart.
+SEARCH_DTHETA_MAX_RAD  = math.radians(80.0)  # full range swept by layer 1
+SEARCH_DXY_MAX_M       = 0.15            # full range swept by layer 1
+COARSE_DTHETA_STEP_RAD = math.radians(10.0)   # layer 1 step -- coarse, cheap
+COARSE_DXY_STEP_M      = 0.05             # layer 1 step -- coarse, cheap
 
-LEVELS = (
-    # Level 0 -- coarse, full reach. Same step/window/separation as the
-    # original single-layer design, so a real motion this module already
-    # handled well continues to be found the same way.
-    _Level(dtheta_step=math.radians(10.0), dxy_step=0.05,
-           dtheta_range=SEARCH_DTHETA_MAX_RAD, dxy_range=SEARCH_DXY_MAX_M,
-           min_sep_dtheta=math.radians(20.0), min_sep_dxy=0.15),
-    # Level 1 -- refine. Window (+/-12deg, +/-6cm) comfortably exceeds half
-    # of level 0's step (+/-5deg, +/-2.5cm), so no level-0 peak can have
-    # landed outside this window relative to its own coarse grid sample.
-    _Level(dtheta_step=math.radians(2.0), dxy_step=0.015,
-           dtheta_range=math.radians(12.0), dxy_range=0.06,
-           min_sep_dtheta=math.radians(6.0), min_sep_dxy=0.05),
-    # Level 2 -- fine. Window (+/-2.5deg, +/-1.5cm) comfortably exceeds
-    # half of level 1's step (+/-1deg, +/-0.75cm). Final achievable
-    # resolution: 0.4deg / 0.4cm -- an order of magnitude finer than the
-    # old greedy walk's finest step (3deg / 3cm), with no risk of a
-    # greedy hill-climb stalling short of the true local peak, since this
-    # is an exhaustive sweep of the window, not a hill-climb.
-    _Level(dtheta_step=math.radians(0.4), dxy_step=0.004,
-           dtheta_range=math.radians(2.5), dxy_range=0.015,
-           min_sep_dtheta=math.radians(1.2), min_sep_dxy=0.01),
-)
+TOP_K_CANDIDATES = 3   # how many DISTINCT coarse peaks survive layer 1.
+                        # K=1 recovers the original single-winner behaviour.
+
+MIN_PEAK_SEPARATION_DTHETA_RAD = math.radians(20.0)
+MIN_PEAK_SEPARATION_DXY_M      = 0.15
+# Two coarse candidates within this angular/linear distance of each other
+# are treated as samples of the SAME local peak (adjacent grid cells),
+# not two distinct peaks -- see _insert_topk_distinct's docstring for why
+# this matters.
+
+# ---------------------------------------------------------------------------
+# Layer 2 -- greedy local-refinement ("pattern search" / "three-step
+# search" family) constants
+# ---------------------------------------------------------------------------
+
+WALK_DTHETA_STEP_RAD   = math.radians(3.0)
+WALK_WINDOW_DTHETA_RAD = math.radians(15.0)   # +/- this much searched each round
+WALK_DXY_STEP_M        = 0.03
+WALK_WINDOW_DXY_M      = 0.06                # +/- this much searched each round
+MAX_WALK_ROUNDS        = 3                   # re-centre at most this many times
+
+MAX_WALK_DTHETA_RAD = math.radians(30.0)  # total reach cap, measured from the
+MAX_WALK_DXY_M       = 0.25               # ORIGINAL guess passed into search()
+                                           # (not from wherever a walk started)
+                                           # -- see _greedy_refine docstring.
+
+IMPROVEMENT_EPS = 1e-6   # a round must beat the current best by more than
+                          # this to count as "improved" -- avoids infinite
+                          # micro-oscillation from floating point noise.
 
 # ---------------------------------------------------------------------------
 # Ambiguity detection
 # ---------------------------------------------------------------------------
 
 AMBIGUITY_MARGIN_RATIO = 0.10
-# If the second-best FINAL (finest-level) candidate scores within this
-# fraction of the best candidate's score, the result is flagged
-# ambiguous=True. Starting value -- tune tighter/looser once real logged
-# (score, second_score) pairs from a known-good run are available, same
-# spirit as every other "deliberately generous starting value" constant
-# elsewhere in this codebase (e.g. pose_estimator.MAX_ACCEPTABLE_RESIDUAL).
-
-AMBIGUITY_MIN_SEP_DTHETA_RAD = math.radians(20.0)
-AMBIGUITY_MIN_SEP_DXY_M = 0.15
-# Separation used ONLY for the final post-refinement "is this second
-# candidate a genuinely different peak" check in search() -- deliberately
-# NOT the same value as any single level's own min_sep_dtheta/min_sep_dxy
-# (see LEVELS above), which exist purely to de-duplicate near-identical
-# GRID samples during that level's own sweep and shrink at finer levels
-# along with the grid step.
-#
-# THE BUG THIS FIXES: an earlier version of this ambiguity check reused
-# LEVELS[-1] (the finest level)'s own min_sep, which is tiny (~1deg/1cm)
-# because it only needs to be big enough to de-duplicate adjacent
-# 0.4deg/0.4cm grid samples. But the actual SCORE SURFACE (Gaussian
-# falloff with SIGMA_ANGLE_RAD/SIGMA_DIST_M ~ 0.15 rad / 0.15 m) is far
-# BROADER than that -- two samples several cm/degrees apart on the same
-# true peak's flat hilltop can score within a fraction of a percent of
-# each other, which is expected and correct (it is one basin, sampled at
-# two nearby points), not evidence of two competing physical peaks. Using
-# the finest level's tiny grid-dedup separation to judge "distinctness"
-# here produced false ambiguity flags on ordinary, well-determined,
-# non-degenerate scans (caught by this module's own self-test: a 3-line,
-# non-parallel, single-true-peak scenario was incorrectly flagged
-# ambiguous because two samples ~1.5deg/1.5cm apart on the SAME peak's
-# broad hilltop both scored ~3.0). Ambiguity is a claim about PHYSICAL
-# space (a second, meaningfully different candidate pose), so it must be
-# judged at a separation scale tied to the score surface's own physical
-# breadth (SIGMA_*), not to whatever grid step the finest pyramid level
-# happens to use.
+# If the second-best refined candidate scores within this fraction of the
+# best candidate's score, the result is flagged ambiguous=True. Starting
+# value -- tune tighter/looser once real logged (score, second_score)
+# pairs from a known-good run are available, same spirit as every other
+# "deliberately generous starting value" constant elsewhere in this
+# codebase (e.g. pose_estimator.MAX_ACCEPTABLE_RESIDUAL).
 
 # ---------------------------------------------------------------------------
 # Soft-scoring falloff widths (NOT hard thresholds -- see module docstring)
@@ -348,25 +277,6 @@ SIGMA_R_M       = 0.08    # arc radius falloff width
 MIN_STATIC_FEATURES    = 3      # need at least this many STATIC map anchors
 MIN_SCORE_PER_FEATURE  = 0.35   # winning candidate must average at least this
                                  # per scored scan feature (max possible is 1.0)
-
-# ---------------------------------------------------------------------------
-# PERFORMANCE CAP (Option 1) -- search() cost scales with n_static_entries
-# (every candidate pose scores against every STATIC line/arc, see
-# _score_candidate_grid). Left unbounded, this grows with the map forever
-# (confirmed directly: lowering MIN_OBS_FOR_STATIC in map_manager.py sped up
-# STATIC promotion and immediately produced a ~15-20x per-scan slowdown once
-# the map reached ~30 STATIC entries, measured via consecutive Scan# refine:
-# log timestamps going from ~0.14s apart to ~2s apart). A STATIC entry far
-# from the current pose guess contributes almost nothing to the Gaussian
-# soft-score anyway (SIGMA_DIST_M/SIGMA_CENTRE_M ~ 0.15m falloff), so capping
-# to the nearest MAX_STATIC_ENTRIES_SEARCHED entries loses negligible real
-# signal for what is, physically, always a local search.
-# ---------------------------------------------------------------------------
-
-MAX_STATIC_ENTRIES_SEARCHED = 40   # generous starting cap -- tune down only
-                                    # after confirming search quality (T1-T7
-                                    # below) is unaffected at your real map
-                                    # density.
 
 # ---------------------------------------------------------------------------
 # Return type
@@ -394,6 +304,21 @@ CoarseResult = namedtuple(
 # second_score : float    -- the second-best refined candidate's score, 0.0
 #                            if fewer than 2 distinct candidates survived.
 #                            Diagnostic / for tuning AMBIGUITY_MARGIN_RATIO.
+
+# ---------------------------------------------------------------------------
+# Timing diagnostics -- module-level last_* attributes, same established
+# pattern as slam.py's SlamState.last_iterations_run etc. Populated on
+# every search() call so a caller (or a benchmark script) can see WHERE
+# time actually went, instead of assuming. Not used for any control-flow
+# decision -- pure instrumentation, same "diagnostics only" status as
+# CoarseResult.score.
+# ---------------------------------------------------------------------------
+last_search_total_s   = 0.0
+last_search_layer1_s  = 0.0
+last_search_layer2_s  = 0.0
+last_search_n_static  = 0
+last_search_n_layer1_candidates = 0
+last_search_n_layer2_candidates = 0
 
 
 def _rotate_point(x, y, cos_t, sin_t):
@@ -423,15 +348,18 @@ def _prepare_static_maps(map_entries, static_status, guess_x=None, guess_y=None,
     """
     Split active STATIC map entries into line / arc lists once per call.
 
-    PERFORMANCE CAP (Option 1 -- see MAX_STATIC_ENTRIES_SEARCHED above): when
+    PERFORMANCE FIX 1 (see MAX_STATIC_ENTRIES_SEARCHED above): when
     guess_x/guess_y are given and the combined STATIC entry count exceeds
     max_entries, only the max_entries entries nearest (by midpoint/centre
     distance) to the current pose guess are kept. This is what keeps
-    search()'s per-scan cost bounded as the map grows, instead of degrading
-    linearly with total map size forever.
+    search()'s per-scan cost bounded as the map grows, instead of
+    degrading linearly (in practice, worse -- see PERFORMANCE FIX 2 below,
+    every kept entry is re-scored by every Layer-2 candidate too) with
+    total map size forever.
 
     guess_x/guess_y default to None (no cap applied) so existing callers
-    that don't pass a guess (e.g. direct unit tests) are unaffected.
+    that don't pass a guess (e.g. direct unit tests) are unaffected --
+    identical behaviour to the pre-fix version at small map sizes.
     """
     candidates = [
         e for e in map_entries if e.active and e.status == static_status
@@ -460,14 +388,6 @@ def _prerotate_features(scan_features, cos_t, sin_t, guess_theta):
         rotated_arcs  : list of (rcx, rcy, r)
     Non-line/arc features are skipped (mirrors line_matcher's handling of
     unknown types).
-
-    NOTE: base_dist here is the Hough distance of the ROTATED-ONLY scan
-    midpoint -- it deliberately does NOT include guess_x/guess_y (those
-    aren't known at rotation time in the original dtheta-outer-loop
-    structure this was written for). _score_candidate below is responsible
-    for adding guess_x/guess_y in on top of (dx, dy) -- see the "GUESS
-    TRANSLATION BUG" fix there; this function itself does not need to
-    change, only its caller's contract needs to be honoured correctly.
     """
     rotated_lines = []
     rotated_arcs = []
@@ -492,37 +412,30 @@ def _prerotate_features(scan_features, cos_t, sin_t, guess_theta):
     return rotated_lines, rotated_arcs
 
 
-def _score_candidate(rotated_lines, rotated_arcs, dx, dy, guess_x, guess_y,
+def _score_candidate(rotated_lines, rotated_arcs, dx, dy,
                       static_lines, static_arcs):
     """
-    SCALAR reference implementation -- kept for cross-checking the
-    vectorized grid path below (see test_vectorized_matches_scalar) and as
-    the direct 1:1 C port source (see PORT PATH in the module docstring).
-    Not used by search() itself anymore -- _score_grid_vectorized replaces
-    it in the hot path. Score one candidate (dx, dy) at the dtheta already
-    baked into rotated_lines/rotated_arcs. Returns (total_score,
-    n_features_scored). Pure O(1)-per-feature-per-map-entry arithmetic --
-    no trig here.
+    SCALAR REFERENCE implementation. Score one candidate (dx, dy) at the
+    dtheta already baked into rotated_lines/rotated_arcs. Returns
+    (total_score, n_features_scored). Pure O(1)-per-feature-per-map-entry
+    arithmetic -- no trig here.
 
-    GUESS TRANSLATION BUG (fixed): the candidate pose being scored is
-    (guess_x + dx, guess_y + dy, guess_theta + dtheta) -- see search()'s
-    own docstring. rotated_lines/rotated_arcs only carry the ROTATED scan
-    geometry (no absolute translation baked in -- see _prerotate_features),
-    so guess_x/guess_y MUST be added here, on top of dx/dy, before
-    comparing against the map's absolute coordinates. The previous version
-    of this function took only (dx, dy) and silently scored every
-    candidate as if guess_x/guess_y were always zero -- correct only at
-    the map origin, silently wrong (and, worse, sometimes confidently
-    wrong -- see module docstring's GUESS TRANSLATION BUG note) everywhere
-    else. Every self-test in this file called search() with
-    guess_x=guess_y=0.0, so this was invisible until real hardware moved
-    the robot away from the origin.
+    PERFORMANCE NOTE (profiled -- see progress notes): this loop, called
+    once per (dx,dy,dtheta) candidate, is the ACTUAL dominant cost of
+    search() -- 97%+ of runtime at n_static=20, not _prerotate_features
+    (under 2%). _score_grid_vectorized below batches this exact
+    computation across an entire (dx,dy) grid at once via numpy instead of
+    one Python-level call per candidate; kept here UNCHANGED as the
+    ground-truth reference for test_vectorized_matches_scalar below, and
+    as the direct 1:1 source for the eventual hand-written C port (numpy
+    has no C equivalent -- the scalar loop shape here, not the vectorized
+    one, is what slam_core/correlative_match.c should mirror).
     """
     total = 0.0
     n_scored = 0
 
     for (rmx, rmy, angle, nx, ny, base_dist) in rotated_lines:
-        dist = base_dist + nx * (guess_x + dx) + ny * (guess_y + dy)
+        dist = base_dist + nx * dx + ny * dy
         best_q = 0.0
         for e in static_lines:
             adiff = _angle_diff_line(angle, e.angle)
@@ -536,8 +449,8 @@ def _score_candidate(rotated_lines, rotated_arcs, dx, dy, guess_x, guess_y,
         n_scored += 1
 
     for (rcx, rcy, r) in rotated_arcs:
-        cx = rcx + guess_x + dx
-        cy = rcy + guess_y + dy
+        cx = rcx + dx
+        cy = rcy + dy
         best_q = 0.0
         for e in static_arcs:
             centre_dist = math.hypot(cx - e.mx, cy - e.my)
@@ -552,18 +465,10 @@ def _score_candidate(rotated_lines, rotated_arcs, dx, dy, guess_x, guess_y,
     return total, n_scored
 
 
-# ---------------------------------------------------------------------------
-# Vectorized grid scoring (Option 3) -- numpy replacement for the dx,dy
-# sub-sweep inside _sweep_and_insert. Same math as _score_candidate /
-# _prerotate_features, computed for the WHOLE dx,dy grid (at one dtheta) in
-# one batch of array operations instead of one Python-level function call
-# per (dx, dy) pair. This is a PC-visualization/prototyping speed change
-# only -- see module docstring's PORT PATH: the scalar functions above stay
-# the source of truth for the eventual hand-written C port, this is not a
-# drop-in translation of this file's structure.
-# ---------------------------------------------------------------------------
-
 def _static_line_arrays(static_lines):
+    """Build once-per-search() numpy arrays of static line angle/distance,
+    reused across every dtheta step of both Layer 1 and Layer 2 --
+    avoids rebuilding these arrays per candidate."""
     if not static_lines:
         return np.empty(0), np.empty(0)
     return (np.array([e.angle for e in static_lines], dtype=np.float64),
@@ -571,6 +476,7 @@ def _static_line_arrays(static_lines):
 
 
 def _static_arc_arrays(static_arcs):
+    """Build once-per-search() numpy arrays of static arc centre/radius."""
     if not static_arcs:
         return np.empty(0), np.empty(0), np.empty(0)
     return (np.array([e.mx for e in static_arcs], dtype=np.float64),
@@ -578,28 +484,53 @@ def _static_arc_arrays(static_arcs):
             np.array([e.distance for e in static_arcs], dtype=np.float64))
 
 
-def _score_grid_vectorized(scan_features, guess_x, guess_y, guess_theta, dtheta,
-                            dx_grid, dy_grid,
+def _score_grid_vectorized(rotated_lines, rotated_arcs, dx_grid, dy_grid,
                             se_angle, se_dist, sa_mx, sa_my, sa_r):
     """
-    Score every (dx, dy) combination in dx_grid x dy_grid, at one fixed
-    dtheta, against all given STATIC line/arc arrays at once.
+    Score every (dx, dy) combination in dx_grid x dy_grid, at the ONE
+    dtheta already baked into rotated_lines/rotated_arcs (from
+    _prerotate_features), against the given STATIC line/arc arrays --
+    all in one batch of numpy operations instead of one Python-level
+    _score_candidate() call per (dx, dy) pair. Same exact arithmetic as
+    _score_candidate (verified by test_vectorized_matches_scalar below,
+    at a NONZERO guess_x/guess_y -- see the warning below for why that
+    specific check matters), just computed for a whole grid at once.
+
+    *** dx_grid / dy_grid MUST ALREADY BE ABSOLUTE VALUES, I.E.
+    guess_x + dx_offset / guess_y + dy_offset -- NEVER dx_offset alone. ***
+
+    This is not a stylistic note -- it is a direct callback to a real,
+    already-shipped regression: the pyramid rewrite of this module (see
+    slam_progress_update_coarse_search_and_trend_gating.md, "Bug 2")
+    dropped guess_x/guess_y from an equivalent vectorized scoring path
+    during an earlier rewrite. It passed every self-test that existed at
+    the time because EVERY one of them called search() with
+    guess_x=guess_y=0.0, and "add 0.0" and "don't add anything" are
+    indistinguishable at that specific input. The bug then produced
+    confidently-wrong (not low-confidence) coarse poses on real hardware
+    once the robot had moved away from the map origin -- i.e. almost
+    always. To avoid repeating that exact mistake here:
+        1. Callers (see _coarse_sweep_topk / _greedy_refine below) build
+           dx_grid/dy_grid with the guess offset already folded in, at
+           the single point where the grid is constructed -- not
+           threaded through as a separate parameter that could be
+           silently forgotten at a call site.
+        2. test_vectorized_matches_scalar below runs its cross-check at
+           a NONZERO guess_x/guess_y specifically -- a dropped-offset bug
+           is invisible at guess=(0,0) by construction, so a regression
+           test that only exercises guess=(0,0) provides zero protection
+           against this exact failure mode.
+        3. search()'s own self-test T9 (new, added alongside this
+           change) additionally checks END-TO-END recovered dx/dy at a
+           nonzero guess, not just the internal scoring function in
+           isolation -- catching the bug even if some future refactor
+           moved where the offset gets added.
 
     Returns (total, n_scored):
-        total    : np.ndarray shape (len(dx_grid), len(dy_grid)) -- summed
-                   soft score across every scan feature, matching what
-                   repeated _score_candidate(dx, dy) calls would produce.
-        n_scored : int -- number of scan features that contributed (lines
-                   + arcs), same definition _score_candidate returns.
-
-    Each scan feature contributes a (n_dx, n_dy) array to `total` via numpy
-    broadcasting against the static arrays -- the O(n_static) "best match"
-    reduction (max over candidates) that _score_candidate does with a
-    Python for-loop + running best_q becomes a single .max(axis=-1) call.
+        total    : np.ndarray shape (len(dx_grid), len(dy_grid))
+        n_scored : int -- same definition as _score_candidate's second
+                   return value
     """
-    cos_t = math.cos(guess_theta + dtheta)
-    sin_t = math.sin(guess_theta + dtheta)
-
     n_dx = dx_grid.shape[0]
     n_dy = dy_grid.shape[0]
     total = np.zeros((n_dx, n_dy), dtype=np.float64)
@@ -608,81 +539,65 @@ def _score_grid_vectorized(scan_features, guess_x, guess_y, guess_theta, dtheta,
     dxg = dx_grid[:, None]   # (n_dx, 1) -- broadcasts against dy below
     dyg = dy_grid[None, :]   # (1, n_dy)
 
-    for feat in scan_features:
-        ftype = feat.get("type")
+    for (rmx, rmy, angle, nx, ny, base_dist) in rotated_lines:
+        n_scored += 1
+        if se_angle.size == 0:
+            continue
 
-        if ftype == "line":
-            x1, y1 = _rotate_point(feat["x1"], feat["y1"], cos_t, sin_t)
-            x2, y2 = _rotate_point(feat["x2"], feat["y2"], cos_t, sin_t)
-            rmx = (x1 + x2) / 2.0
-            rmy = (y1 + y2) / 2.0
-            angle = _wrap_line_angle(feat["angle"] + guess_theta + dtheta)
-            nx, ny = -math.sin(angle), math.cos(angle)
-            base_dist = nx * rmx + ny * rmy
-            n_scored += 1
+        dist = base_dist + nx * dxg + ny * dyg          # (n_dx, n_dy)
 
-            if se_angle.size == 0:
-                continue
+        adiff = np.abs(angle - se_angle) % math.pi        # (n_static,)
+        adiff = np.where(adiff > math.pi / 2.0, math.pi - adiff, adiff)
 
-            # BUG FIX: every candidate pose being scored is
-            # (guess_x + dx, guess_y + dy, guess_theta + dtheta) -- see
-            # search()'s own docstring ("dx, dy, dtheta are corrections to
-            # ADD to guess_x, guess_y, guess_theta"). base_dist above only
-            # has the ROTATED scan midpoint in it; the guess's own absolute
-            # translation was never added before this comparison against
-            # the map's absolute Hough distance. That made every candidate's
-            # score silently wrong by an amount that grows with how far the
-            # robot has actually moved from the map origin -- exactly zero
-            # in every existing self-test (all called with guess_x=guess_y
-            # =0.0), which is why this went undetected. See the module-level
-            # "GUESS TRANSLATION BUG" note for the full failure chain this
-            # caused on hardware (coarse search converging on a confidently
-            # wrong pose once guess_x/guess_y left the ~15cm SIGMA_DIST_M
-            # neighbourhood of the origin).
-            dist = base_dist + nx * (guess_x + dxg) + ny * (guess_y + dyg)   # (n_dx, n_dy)
+        d3 = dist[:, :, None]                              # (n_dx,n_dy,1)
+        ddiff = np.minimum(np.abs(d3 - se_dist), np.abs(d3 + se_dist))
+        q = (np.exp(-(adiff / SIGMA_ANGLE_RAD) ** 2)
+             * np.exp(-(ddiff / SIGMA_DIST_M) ** 2))       # (n_dx,n_dy,n_static)
+        total += q.max(axis=2)
 
-            adiff = np.abs(angle - se_angle) % math.pi        # (n_static,)
-            adiff = np.where(adiff > math.pi / 2.0, math.pi - adiff, adiff)
+    for (rcx, rcy, r) in rotated_arcs:
+        n_scored += 1
+        if sa_mx.size == 0:
+            continue
 
-            d3 = dist[:, :, None]                              # (n_dx,n_dy,1)
-            ddiff = np.minimum(np.abs(d3 - se_dist), np.abs(d3 + se_dist))
-            q = (np.exp(-(adiff / SIGMA_ANGLE_RAD) ** 2)
-                 * np.exp(-(ddiff / SIGMA_DIST_M) ** 2))       # (n_dx,n_dy,n_static)
-            total += q.max(axis=2)
-
-        elif ftype == "arc":
-            rcx, rcy = _rotate_point(feat["cx"], feat["cy"], cos_t, sin_t)
-            n_scored += 1
-
-            if sa_mx.size == 0:
-                continue
-
-            # Same fix as the line case above -- the candidate arc centre
-            # in the MAP frame is (guess_x + dx, guess_y + dy) applied on
-            # top of the rotated scan-frame centre (rcx, rcy), not just
-            # (dx, dy) alone.
-            cx = rcx + guess_x + dxg                           # (n_dx, 1)
-            cy = rcy + guess_y + dyg                           # (1, n_dy)
-            cx3 = np.broadcast_to(cx, (n_dx, n_dy))[:, :, None]
-            cy3 = np.broadcast_to(cy, (n_dx, n_dy))[:, :, None]
-            centre_dist = np.sqrt((cx3 - sa_mx) ** 2 + (cy3 - sa_my) ** 2)
-            rdiff = np.abs(feat["r"] - sa_r)
-            q = (np.exp(-(centre_dist / SIGMA_CENTRE_M) ** 2)
-                 * np.exp(-(rdiff / SIGMA_R_M) ** 2))
-            total += q.max(axis=2)
+        cx = rcx + dxg                                     # (n_dx, 1)
+        cy = rcy + dyg                                     # (1, n_dy)
+        cx3 = np.broadcast_to(cx, (n_dx, n_dy))[:, :, None]
+        cy3 = np.broadcast_to(cy, (n_dx, n_dy))[:, :, None]
+        centre_dist = np.sqrt((cx3 - sa_mx) ** 2 + (cy3 - sa_my) ** 2)
+        rdiff = np.abs(r - sa_r)
+        q = (np.exp(-(centre_dist / SIGMA_CENTRE_M) ** 2)
+             * np.exp(-(rdiff / SIGMA_R_M) ** 2))
+        total += q.max(axis=2)
 
     return total, n_scored
 
 
-def _insert_topk_distinct(top, candidate, k, min_sep_dtheta, min_sep_dxy):
+def _score_pose(scan_features, guess_theta, dtheta, dx, dy, guess_x, guess_y,
+                 static_lines, static_arcs):
+    """
+    Scalar convenience wrapper -- no longer called by search() (Layer 2
+    now uses _score_grid_vectorized, see _greedy_refine), kept only as a
+    single-candidate reference matching _score_candidate's calling
+    convention for ad-hoc debugging/testing.
+    """
+    cos_t = math.cos(guess_theta + dtheta)
+    sin_t = math.sin(guess_theta + dtheta)
+    rotated_lines, rotated_arcs = _prerotate_features(
+        scan_features, cos_t, sin_t, guess_theta + dtheta
+    )
+    return _score_candidate(rotated_lines, rotated_arcs, guess_x + dx, guess_y + dy,
+                             static_lines, static_arcs)
+
+
+def _insert_topk_distinct(top, candidate, k):
     """
     Insert `candidate` = (score, dx, dy, dtheta, n_scored) into `top`
     (mutated in place, kept sorted descending by score, capped at k
     entries) -- but ONLY as a genuinely separate peak. Two candidates
-    within `min_sep_dtheta` / `min_sep_dxy` of each other are treated as
-    the SAME peak (adjacent grid cells sampling the same local maximum, or
-    -- at finer pyramid levels -- two coarse-level survivors that have
-    refined into the same true peak), and only the higher-scoring one is
+    within MIN_PEAK_SEPARATION_DTHETA_RAD / MIN_PEAK_SEPARATION_DXY_M of
+    each other are treated as the SAME peak (adjacent coarse grid cells
+    sampling the same local maximum), and only the higher-scoring one is
     kept.
 
     WHY THIS MATTERS: without this de-duplication, top-K would frequently
@@ -690,15 +605,13 @@ def _insert_topk_distinct(top, candidate, k, min_sep_dtheta, min_sep_dxy):
     peak, instead of K genuinely distinct candidate poses -- silently
     defeating the entire purpose of keeping more than one candidate (which
     is to catch a competing peak elsewhere in the search space, like a
-    rectangular room's +/-90 degree symmetry). The separation thresholds
-    are passed in per-call (not module constants) because they shrink at
-    finer pyramid levels -- see LEVELS' min_sep_dtheta/min_sep_dxy fields.
+    rectangular room's +/-90 degree symmetry).
     """
     score, dx, dy, dtheta, n_scored = candidate
 
     for i, (s2, dx2, dy2, dtheta2, n2) in enumerate(top):
-        if (abs(dtheta - dtheta2) < min_sep_dtheta
-                and math.hypot(dx - dx2, dy - dy2) < min_sep_dxy):
+        if (abs(dtheta - dtheta2) < MIN_PEAK_SEPARATION_DTHETA_RAD
+                and math.hypot(dx - dx2, dy - dy2) < MIN_PEAK_SEPARATION_DXY_M):
             if score > s2:
                 top[i] = candidate
                 top.sort(key=lambda c: -c[0])
@@ -712,75 +625,217 @@ def _insert_topk_distinct(top, candidate, k, min_sep_dtheta, min_sep_dxy):
         top.sort(key=lambda c: -c[0])
 
 
-def _sweep_and_insert(scan_features, guess_x, guess_y, guess_theta,
-                       center_dx, center_dy, center_dtheta,
-                       level, static_lines, static_arcs, top, k):
+def _coarse_sweep_topk(scan_features, guess_x, guess_y, guess_theta,
+                        static_lines, static_arcs, k):
     """
-    Exhaustively sample the window (level.dtheta_range, level.dxy_range)
-    around (center_dtheta, center_dx, center_dy) at (level.dtheta_step,
-    level.dxy_step) resolution, inserting every scorable sample into `top`
-    (mutated in place) via _insert_topk_distinct using level's own
-    separation thresholds.
+    LAYER 1 -- exhaustive sweep of the FULL (SEARCH_DTHETA_MAX_RAD,
+    SEARCH_DXY_MAX_M) window at the COARSE step, keeping the top-k
+    DISTINCT scoring candidates (see _insert_topk_distinct) instead of
+    just the single best. This is what gives visibility into a competing
+    peak that a flat argmax sweep would silently discard.
 
-    VECTORIZED (Option 3): the dtheta loop stays a plain Python loop (small
-    -- at most a few dozen steps even at level 0), but for each dtheta the
-    entire dx,dy grid is now scored in one batch via
-    _score_grid_vectorized/numpy instead of one Python function call per
-    (dx, dy) pair (see that function's docstring). This changes only how
-    the scores are COMPUTED, not the search structure itself -- every grid
-    cell that used to be individually scored and inserted still is;
-    _insert_topk_distinct's de-duplication logic is untouched. See
-    test_vectorized_matches_scalar() in the self-test block for a direct
-    numeric cross-check against the original scalar path.
+    VECTORIZED: the dtheta loop stays a plain Python loop (small -- 13
+    steps at default constants), but for each dtheta the entire dx,dy
+    grid (9x9=81 points at default constants) is scored in ONE batch via
+    _score_grid_vectorized instead of 81 separate _score_candidate calls.
+    Every grid cell that used to be individually scored and inserted
+    still is -- this changes only HOW the scores are computed, not the
+    search structure or which candidates get considered (see
+    test_vectorized_matches_scalar for a direct numeric cross-check).
+
+    Returns a list of up to k tuples (score, dx, dy, dtheta, n_scored),
+    sorted descending by score. May return fewer than k if the window
+    doesn't contain k distinct local peaks.
     """
-    static_line_arrays = _static_line_arrays(static_lines)
-    static_arc_arrays = _static_arc_arrays(static_arcs)
+    top = []
+    n_candidates = 0
 
-    n_dtheta_steps = int(round(2 * level.dtheta_range / level.dtheta_step)) + 1
-    dtheta_offsets = (center_dtheta - level.dtheta_range
-                       + level.dtheta_step * np.arange(n_dtheta_steps))
+    se_angle, se_dist = _static_line_arrays(static_lines)
+    sa_mx, sa_my, sa_r = _static_arc_arrays(static_arcs)
 
-    n_dxy_steps = int(round(2 * level.dxy_range / level.dxy_step)) + 1
-    dx_grid = center_dx - level.dxy_range + level.dxy_step * np.arange(n_dxy_steps)
-    dy_grid = center_dy - level.dxy_range + level.dxy_step * np.arange(n_dxy_steps)
+    n_dtheta_steps = int(round(2 * SEARCH_DTHETA_MAX_RAD / COARSE_DTHETA_STEP_RAD)) + 1
+    dtheta_vals = (-SEARCH_DTHETA_MAX_RAD
+                   + COARSE_DTHETA_STEP_RAD * np.arange(n_dtheta_steps))
 
-    for dtheta in dtheta_offsets:
+    n_dxy_steps = int(round(2 * SEARCH_DXY_MAX_M / COARSE_DXY_STEP_M)) + 1
+    dx_offsets = -SEARCH_DXY_MAX_M + COARSE_DXY_STEP_M * np.arange(n_dxy_steps)
+    dy_offsets = -SEARCH_DXY_MAX_M + COARSE_DXY_STEP_M * np.arange(n_dxy_steps)
+    # ABSOLUTE grids -- guess offset folded in HERE, at construction, not
+    # threaded through _score_grid_vectorized as a separate parameter that
+    # a future edit could forget to add (see that function's docstring).
+    dx_grid = guess_x + dx_offsets
+    dy_grid = guess_y + dy_offsets
+
+    for dtheta in dtheta_vals:
         dtheta = float(dtheta)
-        total, n_scored = _score_grid_vectorized(
-            scan_features, guess_x, guess_y, guess_theta, dtheta,
-            dx_grid, dy_grid, *static_line_arrays, *static_arc_arrays
+        cos_t = math.cos(guess_theta + dtheta)
+        sin_t = math.sin(guess_theta + dtheta)
+        rotated_lines, rotated_arcs = _prerotate_features(
+            scan_features, cos_t, sin_t, guess_theta + dtheta
         )
+
+        total, n_scored = _score_grid_vectorized(
+            rotated_lines, rotated_arcs, dx_grid, dy_grid,
+            se_angle, se_dist, sa_mx, sa_my, sa_r
+        )
+        n_candidates += n_dxy_steps * n_dxy_steps
         if n_scored == 0:
             continue
 
-        # Insert EVERY grid cell, same as the original scalar sweep --
-        # correctness (in particular, not silently missing a genuine
-        # second peak that shares a dtheta with the winner) matters more
-        # here than shaving off insert-bookkeeping calls, and
-        # _insert_topk_distinct's own work per call is O(k)=O(3), trivial
-        # compared to the score computation this replaces. The speedup
-        # comes entirely from _score_grid_vectorized above, not from
-        # skipping any candidates.
         n_dx_local, n_dy_local = total.shape
         for ix in range(n_dx_local):
-            dx = float(dx_grid[ix])
+            dx_off = float(dx_offsets[ix])
             row = total[ix]
             for iy in range(n_dy_local):
                 score = float(row[iy])
                 if score <= 0.0:
                     continue
-                dy = float(dy_grid[iy])
-                _insert_topk_distinct(
-                    top, (score, dx, dy, dtheta, n_scored), k,
-                    level.min_sep_dtheta, level.min_sep_dxy
-                )
+                dy_off = float(dy_offsets[iy])
+                _insert_topk_distinct(top, (score, dx_off, dy_off, dtheta, n_scored), k)
+
+    global last_search_n_layer1_candidates
+    last_search_n_layer1_candidates = n_candidates
+    return top
+
+
+def _within_walk_bounds(dx, dy, dtheta):
+    """True if (dx, dy, dtheta) -- an offset from the ORIGINAL guess passed
+    into search() -- is still within the total reach cap for layer 2."""
+    return (abs(dtheta) <= MAX_WALK_DTHETA_RAD
+            and math.hypot(dx, dy) <= MAX_WALK_DXY_M)
+
+
+def _greedy_refine(scan_features, guess_x, guess_y, guess_theta,
+                    static_lines, static_arcs,
+                    start_dx, start_dy, start_dtheta, start_score, start_n):
+    """
+    LAYER 2 -- pattern-search-style local refinement (the "three-step
+    search" / "diamond search" family used for motion estimation in video
+    codecs is the same core idea): repeatedly sweep a SMALL window centred
+    on the current best candidate, re-centre on whatever improves the
+    score, and stop once a round finds no improvement or MAX_WALK_ROUNDS
+    is reached.
+
+    This lets a single layer-1 candidate reach further than the coarse
+    sweep's own window/step size cheaply (each round only pays for a small
+    local window, not the whole original range), which is what lets this
+    module track fast motion without paying for a permanently wide fine
+    sweep on every scan.
+
+    PERFORMANCE FIX 2a (rotation cache) + 2b (vectorized scoring):
+    the ORIGINAL version of this function called _score_pose for every
+    single (dx_off, dy_off, dtheta_off) candidate, which both re-rotated
+    every scan feature from scratch AND scored one (dx,dy) at a time via
+    a Python-level loop. Profiling (see progress notes) showed the
+    rotation redundancy was actually a rounding error (<2% of total
+    runtime) -- the REAL cost is the per-candidate scoring loop itself
+    (_score_candidate's O(n_scan x n_static) inner loop, called once per
+    candidate). This revision fixes both: rotate ONCE per dtheta_off
+    (outer loop, same restructuring as before), then score the ENTIRE
+    dx,dy sub-grid for that dtheta_off in one numpy batch via
+    _score_grid_vectorized instead of one Python call per candidate.
+
+    Same candidates evaluated, same bounds, same MAX_WALK_ROUNDS /
+    stopping rule -- only HOW each candidate's score is computed changes
+    (see test_vectorized_matches_scalar for a direct numeric cross-check
+    against the untouched scalar reference, _score_candidate).
+
+    BOUNDED SEARCH, NOT UNBOUNDED HILL-CLIMBING: every candidate evaluated
+    must satisfy _within_walk_bounds relative to the ORIGINAL guess passed
+    into search() -- not relative to wherever this particular walk started.
+    Without this cap, a sequence of small local improvements could in
+    principle keep walking the pose arbitrarily far from a trustworthy
+    region, one small "still slightly better" step at a time. Same
+    "cap the total correction, not the per-step size" philosophy as
+    slam.py's MAX_DELTA_ROTATION_RAD / _clamp_iteration_step.
+
+    KNOWN LIMITATION (unchanged by this fix -- why this is only HALF the
+    fix, see module docstring): a greedy walk run from a SINGLE starting
+    point can only ever discover the local peak nearest that starting
+    point; it can walk past a competing peak's basin without ever noticing
+    it exists. Making each candidate cheaper to evaluate does not change
+    WHICH candidates get evaluated or WHERE the walk can converge -- this
+    limitation is about search coverage, not about CPU cost, and is not
+    addressed by this fix. This is exactly why search() runs this function
+    independently from MULTIPLE starting points (the K survivors of layer
+    1) rather than greedily refining only the single best coarse candidate
+    -- each walk explores its own local neighbourhood, and comparing the K
+    final results is what surfaces ambiguity instead of hiding it.
+
+    Returns (dx, dy, dtheta, score, n_scored) -- the refined candidate.
+    """
+    cur_dx, cur_dy, cur_dtheta = start_dx, start_dy, start_dtheta
+    cur_score, cur_n = start_score, start_n
+    n_candidates = 0
+
+    se_angle, se_dist = _static_line_arrays(static_lines)
+    sa_mx, sa_my, sa_r = _static_arc_arrays(static_arcs)
+
+    n_dtheta_off_steps = int(round(2 * WALK_WINDOW_DTHETA_RAD / WALK_DTHETA_STEP_RAD)) + 1
+    n_dxy_off_steps = int(round(2 * WALK_WINDOW_DXY_M / WALK_DXY_STEP_M)) + 1
+    dtheta_offsets = (-WALK_WINDOW_DTHETA_RAD
+                      + WALK_DTHETA_STEP_RAD * np.arange(n_dtheta_off_steps))
+    dxy_offsets = -WALK_WINDOW_DXY_M + WALK_DXY_STEP_M * np.arange(n_dxy_off_steps)
+
+    for _ in range(MAX_WALK_ROUNDS):
+        best_dx, best_dy, best_dtheta = cur_dx, cur_dy, cur_dtheta
+        best_score, best_n = cur_score, cur_n
+
+        for dtheta_off in dtheta_offsets:
+            dtheta_off = float(dtheta_off)
+            cand_dtheta = cur_dtheta + dtheta_off
+
+            # Rotate ONCE for this dtheta_off -- reused across every
+            # (dx_off, dy_off) candidate below (Fix 2a).
+            cos_t = math.cos(guess_theta + cand_dtheta)
+            sin_t = math.sin(guess_theta + cand_dtheta)
+            rotated_lines, rotated_arcs = _prerotate_features(
+                scan_features, cos_t, sin_t, guess_theta + cand_dtheta
+            )
+
+            # ABSOLUTE grids -- guess offset AND the walk's current
+            # re-centre point (cur_dx/cur_dy) folded in HERE, at
+            # construction -- same discipline as _coarse_sweep_topk, see
+            # _score_grid_vectorized's docstring for why this matters.
+            dx_grid = guess_x + cur_dx + dxy_offsets
+            dy_grid = guess_y + cur_dy + dxy_offsets
+
+            total, n_scored = _score_grid_vectorized(
+                rotated_lines, rotated_arcs, dx_grid, dy_grid,
+                se_angle, se_dist, sa_mx, sa_my, sa_r
+            )
+            n_candidates += n_dxy_off_steps * n_dxy_off_steps
+            if n_scored == 0:
+                continue
+
+            for ix in range(n_dxy_off_steps):
+                cand_dx = cur_dx + float(dxy_offsets[ix])
+                row = total[ix]
+                for iy in range(n_dxy_off_steps):
+                    cand_dy = cur_dy + float(dxy_offsets[iy])
+                    if not _within_walk_bounds(cand_dx, cand_dy, cand_dtheta):
+                        continue
+                    score = float(row[iy])
+                    if score > best_score + IMPROVEMENT_EPS:
+                        best_score, best_n = score, n_scored
+                        best_dx, best_dy, best_dtheta = cand_dx, cand_dy, cand_dtheta
+
+        if best_score <= cur_score + IMPROVEMENT_EPS:
+            break   # no improvement this round -- converged, stop early
+        cur_dx, cur_dy, cur_dtheta = best_dx, best_dy, best_dtheta
+        cur_score, cur_n = best_score, best_n
+
+    global last_search_n_layer2_candidates
+    last_search_n_layer2_candidates += n_candidates
+    return cur_dx, cur_dy, cur_dtheta, cur_score, cur_n
+
 
 
 def search(scan_features, map_entries, guess_x, guess_y, guess_theta,
            static_status=1):
     """
-    Run the multi-resolution correlative coarse pose search (see module
-    docstring for the full pyramid rationale).
+    Run the two-layer correlative coarse pose search (see module docstring
+    for the full breadth+reach rationale).
 
     Parameters
     ----------
@@ -805,92 +860,87 @@ def search(scan_features, map_entries, guess_x, guess_y, guess_theta,
     candidate was found; caller should apply the delta but not yet trust
     it to author new map evidence (see slam.py's delta_fully_trusted).
     """
+    global last_search_total_s, last_search_layer1_s, last_search_layer2_s
+    global last_search_n_static, last_search_n_layer1_candidates
+    global last_search_n_layer2_candidates
+    last_search_n_layer2_candidates = 0   # accumulated across all K walks below
+    t_search_start = time.perf_counter()
+
+    # PERFORMANCE FIX 1: pass guess_x/guess_y through so the static-entry
+    # cap (MAX_STATIC_ENTRIES_SEARCHED) can select the entries nearest the
+    # current pose guess instead of scoring the whole map every scan.
     static_lines, static_arcs = _prepare_static_maps(
         map_entries, static_status, guess_x, guess_y
     )
     n_static = len(static_lines) + len(static_arcs)
+    last_search_n_static = n_static
 
     if n_static < MIN_STATIC_FEATURES:
+        last_search_total_s = time.perf_counter() - t_search_start
         return CoarseResult(dx=0.0, dy=0.0, dtheta=0.0, score=0.0,
                              n_static=n_static, valid=False,
                              ambiguous=False, second_score=0.0)
 
-    # ---- Level 0: full-window coarse sweep, centred on the original guess
-    top = []
-    _sweep_and_insert(scan_features, guess_x, guess_y, guess_theta,
-                       0.0, 0.0, 0.0, LEVELS[0],
-                       static_lines, static_arcs, top, TOP_K_CANDIDATES)
+    # ---- Layer 1: coarse sweep, keep top-K distinct candidates ----------
+    t_layer1_start = time.perf_counter()
+    top = _coarse_sweep_topk(scan_features, guess_x, guess_y, guess_theta,
+                              static_lines, static_arcs, TOP_K_CANDIDATES)
+    last_search_layer1_s = time.perf_counter() - t_layer1_start
 
     if not top:
+        last_search_total_s = time.perf_counter() - t_search_start
         return CoarseResult(dx=0.0, dy=0.0, dtheta=0.0, score=0.0,
                              n_static=n_static, valid=False,
                              ambiguous=False, second_score=0.0)
 
-    # ---- Levels 1..N: refine EVERY surviving candidate at progressively
-    # finer resolution, each level's sweep re-centred on the candidate it
-    # refines. Each survivor is refined INDEPENDENTLY into its own local
-    # top-1 (not into one top-k list shared across all survivors) -- this
-    # matters when candidates tie or nearly tie (e.g. a genuinely flat
-    # ridge, like the parallel-wall translation ambiguity where dx is
-    # completely unconstrained): sharing one top-k budget across survivors
-    # let the FIRST survivor's own local neighborhood fill the entire
-    # budget before the other survivors were even refined, silently
-    # discarding genuinely distinct peaks the level above had already
-    # found and correctly kept separate. Refining independently then
-    # merging guarantees every surviving level-(L-1) candidate contributes
-    # at least one representative going into the next level, unless two
-    # independent survivors' refinements land on the same point (in which
-    # case merging them is correct).
-    for level in LEVELS[1:]:
-        next_top = []
-        for (_score, dx, dy, dtheta, _n) in top:
-            local_top = []
-            _sweep_and_insert(scan_features, guess_x, guess_y, guess_theta,
-                               dx, dy, dtheta, level,
-                               static_lines, static_arcs, local_top, 1)
-            if local_top:
-                _insert_topk_distinct(
-                    next_top, local_top[0], TOP_K_CANDIDATES,
-                    level.min_sep_dtheta, level.min_sep_dxy
-                )
-        if next_top:
-            top = next_top
-        # else: refinement found nothing scorable at this level -- keep the
-        # coarser level's top as a fallback rather than losing everything
-        # (defensive; the candidate's own centre was already scorable, so
-        # this should not normally trigger).
+    # ---- Layer 2: refine each surviving candidate independently ---------
+    t_layer2_start = time.perf_counter()
+    refined = []
+    for score, dx, dy, dtheta, n_scored in top:
+        rdx, rdy, rdtheta, rscore, rn = _greedy_refine(
+            scan_features, guess_x, guess_y, guess_theta,
+            static_lines, static_arcs, dx, dy, dtheta, score, n_scored,
+        )
+        refined.append((rscore, rdx, rdy, rdtheta, rn))
+    last_search_layer2_s = time.perf_counter() - t_layer2_start
 
-    top.sort(key=lambda c: -c[0])
-    best_score, best_dx, best_dy, best_dtheta, best_n = top[0]
+    refined.sort(key=lambda c: -c[0])
+    best_score, best_dx, best_dy, best_dtheta, best_n = refined[0]
 
-    # Only count a second candidate as genuinely competing if it is STILL
-    # a separate peak from the winner at a separation scale tied to the
-    # score surface's own physical breadth (AMBIGUITY_MIN_SEP_*, NOT the
-    # finest level's tiny grid-dedup threshold -- see that constant's
-    # docstring for why conflating the two produced false ambiguity flags
-    # on ordinary, well-determined scans).
+    # Two DIFFERENT layer-1 seeds can walk (layer 2) into the SAME final
+    # peak if their basins overlap -- refinement is a converging process,
+    # not a fixed offset, so "started distinct" does not guarantee "ended
+    # distinct". Comparing best_score against a near-duplicate of itself
+    # would report ambiguity that isn't real. Only count a refined
+    # candidate as the "second" one for ambiguity purposes if it is STILL
+    # a genuinely separate peak from the winner after refinement, using
+    # the same separation test _insert_topk_distinct used before
+    # refinement.
     second_score = 0.0
-    for (s, dx, dy, dtheta, n) in top[1:]:
-        if (abs(dtheta - best_dtheta) >= AMBIGUITY_MIN_SEP_DTHETA_RAD
-                or math.hypot(dx - best_dx, dy - best_dy) >= AMBIGUITY_MIN_SEP_DXY_M):
+    for (s, dx, dy, dtheta, n) in refined[1:]:
+        if (abs(dtheta - best_dtheta) >= MIN_PEAK_SEPARATION_DTHETA_RAD
+                or math.hypot(dx - best_dx, dy - best_dy) >= MIN_PEAK_SEPARATION_DXY_M):
             second_score = s
-            break   # top is sorted descending -- first distinct entry
+            break   # refined is sorted descending -- first distinct entry
                      # found is the best genuinely-competing candidate
 
     if best_n == 0:
+        last_search_total_s = time.perf_counter() - t_search_start
         return CoarseResult(dx=0.0, dy=0.0, dtheta=0.0, score=0.0,
                              n_static=n_static, valid=False,
                              ambiguous=False, second_score=0.0)
 
     normalized = best_score / best_n
     if normalized < MIN_SCORE_PER_FEATURE:
+        last_search_total_s = time.perf_counter() - t_search_start
         return CoarseResult(dx=0.0, dy=0.0, dtheta=0.0, score=best_score,
                              n_static=n_static, valid=False,
                              ambiguous=False, second_score=second_score)
 
-    ambiguous = (len(top) > 1
+    ambiguous = (len(refined) > 1
                  and second_score >= best_score * (1.0 - AMBIGUITY_MARGIN_RATIO))
 
+    last_search_total_s = time.perf_counter() - t_search_start
     return CoarseResult(dx=best_dx, dy=best_dy, dtheta=best_dtheta,
                          score=best_score, n_static=n_static, valid=True,
                          ambiguous=ambiguous, second_score=second_score)
@@ -921,8 +971,7 @@ if __name__ == "__main__":
 
     # ── T1: map built at origin, scan taken after a real 8cm/6deg motion ──
     # (well outside line_matcher's hard thresholds at zero-guess, but well
-    # inside this module's search window) -- and now recovered to FINE
-    # pyramid precision, not just the old coarse+greedy tolerance.
+    # inside this module's search window)
     true_dx, true_dy, true_dtheta = 0.08, -0.05, math.radians(6.0)
 
     def _shift(feat, dx, dy, dtheta):
@@ -937,22 +986,21 @@ if __name__ == "__main__":
     map_e = [
         _ME(angle=0.0, distance=1.0, mx=0.0, my=1.0, status=1, active=True),
         _ME(angle=math.pi/2, distance=2.0, mx=2.0, my=0.0, status=1, active=True),
-        _ME(angle=-math.pi/3, distance=1.4, mx=1.212, my=0.7, status=1, active=True),
+        _ME(angle=-math.pi/3, distance=1.4, mx=-0.6, my=0.8, status=1, active=True),
     ]
     base_scan = [
         _line_feat(0.0, 1.0, -0.5, 1.0, 0.5, 1.0),
         _line_feat(math.pi/2, 2.0, 2.0, -0.5, 2.0, 0.5),
-        _line_feat(-math.pi/3, 1.4, 0.962, 1.133, 1.462, 0.267),
+        _line_feat(-math.pi/3, 1.4, -1.0, 0.2, -0.3, 1.0),
     ]
     moved_scan = [_shift(f, true_dx, true_dy, true_dtheta) for f in base_scan]
 
     result = search(moved_scan, map_e, guess_x=0.0, guess_y=0.0, guess_theta=0.0)
     assert result.valid, f"T1 expected valid result, got {result}"
-    finest = LEVELS[-1]
-    assert abs(result.dx - true_dx) < finest.dxy_step * 2, f"T1 dx off: {result}"
-    assert abs(result.dy - true_dy) < finest.dxy_step * 2, f"T1 dy off: {result}"
-    assert abs(result.dtheta - true_dtheta) < finest.dtheta_step * 2, f"T1 dtheta off: {result}"
-    print(f"  T1 PASS  recovered pose to fine pyramid precision "
+    assert abs(result.dx - true_dx) < WALK_DXY_STEP_M, f"T1 dx off: {result}"
+    assert abs(result.dy - true_dy) < WALK_DXY_STEP_M, f"T1 dy off: {result}"
+    assert abs(result.dtheta - true_dtheta) < WALK_DTHETA_STEP_RAD, f"T1 dtheta off: {result}"
+    print(f"  T1 PASS  recovered pose within refined resolution "
           f"(dx={result.dx:.4f} dy={result.dy:.4f} dtheta={math.degrees(result.dtheta):.2f}deg) "
           f"ambiguous={result.ambiguous}")
 
@@ -970,8 +1018,8 @@ if __name__ == "__main__":
     ]
     result3 = search(moved_scan, map_with_mover, guess_x=0.0, guess_y=0.0, guess_theta=0.0)
     assert result3.valid, f"T3 expected valid result, got {result3}"
-    assert abs(result3.dx - true_dx) < finest.dxy_step * 2
-    assert abs(result3.dy - true_dy) < finest.dxy_step * 2
+    assert abs(result3.dx - true_dx) < WALK_DXY_STEP_M
+    assert abs(result3.dy - true_dy) < WALK_DXY_STEP_M
     assert result3.n_static == 3, f"T3 expected n_static=3 (movers excluded), got {result3.n_static}"
     print(f"  T3 PASS  DYNAMIC/UNCLASSIFIED entries excluded from search: {result3}")
 
@@ -987,10 +1035,16 @@ if __name__ == "__main__":
     #         PERPENDICULAR to them but leave translation PARALLEL to them
     #         totally unconstrained). Two candidate x-offsets on either
     #         side of the true position score almost identically because
-    #         nothing in the scan disambiguates them. ambiguous MUST fire,
-    #         even after multi-resolution refinement collapses each side's
-    #         many near-tied x samples down to one representative peak per
-    #         side.
+    #         nothing in the scan disambiguates them. ambiguous MUST fire.
+    #         (A 90-degree-rotational-symmetry case is a real ambiguity
+    #         too, but at typical separations it sits OUTSIDE this
+    #         search's own coarse window and so isn't a same-scan
+    #         ambiguity this function could ever be expected to catch in
+    #         one shot -- that class of drift is what the cross-scan
+    #         trend/probation guard in slam.py exists for instead.)
+    # Three walls, all STILL parallel (all angle=0) so x stays completely
+    # unconstrained -- three instead of two only to clear
+    # MIN_STATIC_FEATURES, not to break the ambiguity being tested.
     map_parallel = [
         _ME(angle=0.0, distance=1.0, mx=0.0, my=1.0, status=1, active=True),
         _ME(angle=0.0, distance=-1.0, mx=0.0, my=-1.0, status=1, active=True),
@@ -1012,6 +1066,10 @@ if __name__ == "__main__":
           f"(best={result5.score:.3f} second={result5.second_score:.3f})")
 
     # ── T6: same walls, but one arc anchors x -- ambiguity resolved ────────
+    # Same fix pose_estimator.py's own T7 uses (an arc centre constraint is
+    # never direction-degenerate) -- here it should also collapse the
+    # NUMBER of near-tied candidates correlative_match finds, not just fix
+    # the later least-squares solve.
     map_asym = list(map_parallel) + [
         _ME(angle=-10.0, distance=0.3, mx=0.5, my=0.5, status=1, active=True),
     ]
@@ -1028,100 +1086,158 @@ if __name__ == "__main__":
     print(f"  T6 PASS  arc anchors translation -- ambiguity resolved "
           f"(best={result6.score:.3f} second={result6.second_score:.3f})")
 
-    # ── T7: PRECISION -- this is the actual capability gain from switching
-    #         to a real multi-resolution pyramid instead of coarse-sweep +
-    #         greedy-walk: a real motion well within the search window
-    #         should now be recovered to sub-degree / sub-centimetre
-    #         accuracy (old finest greedy step was 3deg/3cm; new finest
-    #         pyramid level is 0.4deg/0.4cm), and WITHOUT any risk of a
-    #         greedy hill-climb stalling short of the true local peak
-    #         (this sweeps the finest window exhaustively, it does not
-    #         hill-climb). ─────────────────────────────────────────────
-    true_dx7, true_dy7, true_dtheta7 = 0.041, 0.017, math.radians(4.3)
-    moved_scan7 = [_shift(f, true_dx7, true_dy7, true_dtheta7) for f in base_scan]
-    result7 = search(moved_scan7, map_e, guess_x=0.0, guess_y=0.0, guess_theta=0.0)
-    assert result7.valid, f"T7 expected valid result, got {result7}"
-    assert abs(result7.dx - true_dx7) < 0.004, f"T7 dx not fine-precision: {result7}"
-    assert abs(result7.dy - true_dy7) < 0.004, f"T7 dy not fine-precision: {result7}"
-    assert abs(result7.dtheta - true_dtheta7) < math.radians(0.6), \
-        f"T7 dtheta not fine-precision: {result7}"
-    print(f"  T7 PASS  fine-pyramid precision recovered a sub-5cm/5deg motion to "
-          f"sub-cm/sub-degree accuracy (dx={result7.dx:.4f} dy={result7.dy:.4f} "
-          f"dtheta={math.degrees(result7.dtheta):.2f}deg) -- old greedy-walk finest "
-          f"step (3deg/3cm) could not have matched this without hill-climb risk")
+    # ── T7: a fast combined motion beyond the LAYER-1 window, but within
+    #         the layer-2 total reach cap, must still be recovered -- this
+    #         is the whole point of the greedy-walk "reach" extension. ────
+    true_dx7, true_dy7, true_dtheta7 = 0.22, 0.05, math.radians(25.0)
+    assert math.hypot(true_dx7, true_dy7) > SEARCH_DXY_MAX_M or abs(true_dtheta7) > SEARCH_DTHETA_MAX_RAD, \
+        "T7 setup: motion must exceed layer-1's own window to test layer-2 reach"
+    assert math.hypot(true_dx7, true_dy7) <= MAX_WALK_DXY_M and abs(true_dtheta7) <= MAX_WALK_DTHETA_RAD, \
+        "T7 setup: motion must still be within layer-2's total reach cap"
 
-    # ── T8: GUESS TRANSLATION BUG regression -- guess_x/guess_y are
-    #         nonzero (the robot has genuinely moved from the map origin),
-    #         which every earlier test in this file (T1-T7) never
-    #         exercised -- all called search() with guess_x=guess_y=0.0.
-    #         Before the fix, search() silently dropped guess_x/guess_y
-    #         from every candidate's scored distance, so any guess away
-    #         from the origin produced systematically -- and sometimes
-    #         confidently -- wrong results. This recovers a real small
-    #         motion FROM a pose that is already well away from the
-    #         origin, exactly the situation a real moving robot is in
-    #         almost the entire time it runs. ─────────────────────────
-    guess_x8, guess_y8, guess_theta8 = 1.20, -0.70, math.radians(20.0)
-    true_dx8, true_dy8, true_dtheta8 = 0.05, -0.03, math.radians(4.0)
-    total_dx8 = guess_x8 + true_dx8
-    total_dy8 = guess_y8 + true_dy8
-    total_dtheta8 = guess_theta8 + true_dtheta8
-    moved_scan8 = [_shift(f, total_dx8, total_dy8, total_dtheta8) for f in base_scan]
+    map_e7 = [
+        _ME(angle=0.0, distance=1.0, mx=0.0, my=1.0, status=1, active=True),
+        _ME(angle=math.pi/2, distance=2.0, mx=2.0, my=0.0, status=1, active=True),
+        _ME(angle=-math.pi/3, distance=1.4, mx=-0.6, my=0.8, status=1, active=True),
+        _ME(angle=-10.0, distance=0.4, mx=0.3, my=1.6, status=1, active=True),
+    ]
+    scan_e7_base = base_scan + [
+        {"type": "arc", "cx": 0.3, "cy": 1.6, "r": 0.4, "length": 0.4 * math.pi, "quality": 100},
+    ]
+    fast_scan7 = [_shift(f, true_dx7, true_dy7, true_dtheta7) if f["type"] == "line" else f
+                  for f in scan_e7_base]
+    # also shift the arc centre for consistency
+    cos_t7, sin_t7 = math.cos(-true_dtheta7), math.sin(-true_dtheta7)
+    for f in fast_scan7:
+        if f["type"] == "arc":
+            cx = f["cx"] - true_dx7; cy = f["cy"] - true_dy7
+            f["cx"], f["cy"] = _rotate_point(cx, cy, cos_t7, sin_t7)
 
-    result8 = search(moved_scan8, map_e,
-                      guess_x=guess_x8, guess_y=guess_y8, guess_theta=guess_theta8)
-    assert result8.valid, f"T8 expected valid result, got {result8}"
-    assert abs(result8.dx - true_dx8) < finest.dxy_step * 2, \
-        f"T8 dx off -- GUESS TRANSLATION BUG regression: {result8}"
-    assert abs(result8.dy - true_dy8) < finest.dxy_step * 2, \
-        f"T8 dy off -- GUESS TRANSLATION BUG regression: {result8}"
-    assert abs(result8.dtheta - true_dtheta8) < finest.dtheta_step * 2, \
-        f"T8 dtheta off -- GUESS TRANSLATION BUG regression: {result8}"
-    print(f"  T8 PASS  recovered a small motion from a NONZERO guess "
-          f"(guess=({guess_x8:.2f},{guess_y8:.2f},{math.degrees(guess_theta8):.0f}deg)): "
-          f"dx={result8.dx:.4f} dy={result8.dy:.4f} dtheta={math.degrees(result8.dtheta):.2f}deg "
-          f"-- this exact case was silently wrong before the guess-translation fix")
+    result7 = search(fast_scan7, map_e7, guess_x=0.0, guess_y=0.0, guess_theta=0.0)
+    assert result7.valid, f"T7 expected valid result (reach cap should cover this motion), got {result7}"
+    assert abs(result7.dx - true_dx7) < 0.04, f"T7 dx off: {result7}"
+    assert abs(result7.dy - true_dy7) < 0.04, f"T7 dy off: {result7}"
+    assert abs(result7.dtheta - true_dtheta7) < math.radians(4.0), f"T7 dtheta off: {result7}"
+    print(f"  T7 PASS  fast motion beyond layer-1's own window recovered via "
+          f"layer-2 reach (dx={result7.dx:.3f} dy={result7.dy:.3f} "
+          f"dtheta={math.degrees(result7.dtheta):.1f}deg)")
 
-    # ── T9: direct cross-check between the vectorized hot path
-    #         (_score_grid_vectorized) and the scalar reference path
-    #         (_prerotate_features/_score_candidate) at a NONZERO guess --
-    #         this is the "test_vectorized_matches_scalar" cross-check the
-    #         "Vectorized grid scoring" section's own comment has promised
-    #         since it was written, but which never actually existed.
-    #         Confirms both paths agree AND both correctly include
-    #         guess_x/guess_y (the fix above touched both paths). ───────
-    guess_x9, guess_y9, guess_theta9 = 0.8, 0.6, math.radians(-10.0)
-    dtheta9_probe = math.radians(2.0)
-    dx9_probe, dy9_probe = 0.03, -0.02
+    # ── T8: test_vectorized_matches_scalar -- direct numeric cross-check
+    #         between _score_grid_vectorized and the untouched scalar
+    #         reference (_score_candidate), at a NONZERO guess_x/guess_y.
+    #         See _score_grid_vectorized's docstring: an earlier rewrite of
+    #         the pyramid version of this module dropped guess_x/guess_y
+    #         from an equivalent vectorized path and passed every existing
+    #         test, because every existing test used guess=(0,0) -- a
+    #         dropped offset is invisible there by construction. This test
+    #         is written specifically so a repeat of that exact mistake
+    #         CANNOT pass silently. ─────────────────────────────────────
+    rng_map = [
+        _ME(angle=0.1, distance=1.2, mx=0.3, my=1.1, status=1, active=True),
+        _ME(angle=math.pi / 2 - 0.05, distance=1.8, mx=1.9, my=0.2, status=1, active=True),
+        _ME(angle=-math.pi / 3, distance=0.9, mx=0.6, my=0.3, status=1, active=True),
+        _ME(angle=-10.0, distance=0.35, mx=0.7, my=0.6, status=1, active=True),  # ARC
+    ]
+    rng_scan = [
+        _line_feat(0.08, 1.15, -0.5, 1.1, 0.5, 1.2),
+        _line_feat(math.pi / 2 - 0.02, 1.75, 1.8, -0.3, 2.0, 0.6),
+        _line_feat(-math.pi / 3 + 0.03, 0.92, 0.3, -0.1, 0.9, 0.6),
+        {"type": "arc", "cx": 0.68, "cy": 0.58, "r": 0.35,
+         "length": 0.35 * math.pi, "quality": 100},
+    ]
+    static_lines_t8 = [e for e in rng_map if not e.is_arc()]
+    static_arcs_t8  = [e for e in rng_map if e.is_arc()]
 
-    static_lines9, static_arcs9 = _prepare_static_maps(map_e, static_status=1)
-    se_angle9, se_dist9 = _static_line_arrays(static_lines9)
-    sa_mx9, sa_my9, sa_r9 = _static_arc_arrays(static_arcs9)
-
-    vec_total9, vec_n9 = _score_grid_vectorized(
-        base_scan, guess_x9, guess_y9, guess_theta9, dtheta9_probe,
-        np.array([dx9_probe]), np.array([dy9_probe]),
-        se_angle9, se_dist9, sa_mx9, sa_my9, sa_r9,
+    # Deliberately NONZERO guess -- this is the one condition that made
+    # the historical bug invisible. dx_grid/dy_grid built exactly the way
+    # _coarse_sweep_topk / _greedy_refine build them: guess + offsets.
+    guess_x_t8, guess_y_t8, guess_theta_t8 = 1.35, -0.72, math.radians(9.0)
+    dtheta_probe = math.radians(3.0)
+    cos_t8 = math.cos(guess_theta_t8 + dtheta_probe)
+    sin_t8 = math.sin(guess_theta_t8 + dtheta_probe)
+    rotated_lines_t8, rotated_arcs_t8 = _prerotate_features(
+        rng_scan, cos_t8, sin_t8, guess_theta_t8 + dtheta_probe
     )
 
-    cos_t9 = math.cos(guess_theta9 + dtheta9_probe)
-    sin_t9 = math.sin(guess_theta9 + dtheta9_probe)
-    rotated_lines9, rotated_arcs9 = _prerotate_features(
-        base_scan, cos_t9, sin_t9, guess_theta9 + dtheta9_probe
-    )
-    scalar_total9, scalar_n9 = _score_candidate(
-        rotated_lines9, rotated_arcs9, dx9_probe, dy9_probe, guess_x9, guess_y9,
-        static_lines9, static_arcs9,
+    dx_offsets_t8 = np.array([-0.06, -0.03, 0.0, 0.03, 0.06])
+    dy_offsets_t8 = np.array([-0.06, -0.03, 0.0, 0.03, 0.06])
+    dx_grid_t8 = guess_x_t8 + dx_offsets_t8
+    dy_grid_t8 = guess_y_t8 + dy_offsets_t8
+
+    se_angle_t8, se_dist_t8 = _static_line_arrays(static_lines_t8)
+    sa_mx_t8, sa_my_t8, sa_r_t8 = _static_arc_arrays(static_arcs_t8)
+    total_grid, n_scored_grid = _score_grid_vectorized(
+        rotated_lines_t8, rotated_arcs_t8, dx_grid_t8, dy_grid_t8,
+        se_angle_t8, se_dist_t8, sa_mx_t8, sa_my_t8, sa_r_t8
     )
 
-    assert vec_n9 == scalar_n9, f"T9 feature count mismatch: {vec_n9} vs {scalar_n9}"
-    assert abs(float(vec_total9[0, 0]) - scalar_total9) < 1e-6, (
-        f"T9 vectorized/scalar score mismatch at nonzero guess: "
-        f"vec={float(vec_total9[0, 0]):.6f} scalar={scalar_total9:.6f}"
-    )
-    print(f"  T9 PASS  vectorized and scalar scoring paths agree at a nonzero "
-          f"guess (score={scalar_total9:.4f}) -- the cross-check this file's "
-          f"own comments promised but never implemented")
+    max_abs_diff = 0.0
+    for ix, dxo in enumerate(dx_offsets_t8):
+        for iy, dyo in enumerate(dy_offsets_t8):
+            scalar_total, scalar_n = _score_candidate(
+                rotated_lines_t8, rotated_arcs_t8,
+                guess_x_t8 + float(dxo), guess_y_t8 + float(dyo),
+                static_lines_t8, static_arcs_t8,
+            )
+            diff = abs(scalar_total - float(total_grid[ix, iy]))
+            max_abs_diff = max(max_abs_diff, diff)
+            assert scalar_n == n_scored_grid, \
+                f"T8 n_scored mismatch: scalar={scalar_n} vectorized={n_scored_grid}"
+
+    assert max_abs_diff < 1e-9, \
+        f"T8 vectorized scoring must match the scalar reference exactly " \
+        f"(max abs diff={max_abs_diff}) -- if this fails, check that " \
+        f"guess_x/guess_y is being folded into dx_grid/dy_grid BEFORE " \
+        f"calling _score_grid_vectorized, not passed separately or dropped"
+    print(f"  T8 PASS  test_vectorized_matches_scalar: vectorized grid scoring "
+          f"matches the scalar reference exactly (max abs diff={max_abs_diff:.2e}) "
+          f"at a NONZERO guess (x={guess_x_t8}, y={guess_y_t8}, "
+          f"theta={math.degrees(guess_theta_t8):.1f}deg)")
+
+    # ── T9: END-TO-END nonzero-guess regression -- catches the bug even if
+    #         some future refactor moved WHERE the guess offset gets added
+    #         (T8 only checks the scoring function in isolation). Same
+    #         small-motion recovery as T1, just centred on a pose far from
+    #         the map origin instead of at it -- this is exactly the
+    #         real-hardware condition ("almost always, once the robot has
+    #         moved") that let the historical bug through undetected. ────
+    map_e9 = [
+        _ME(angle=0.0, distance=1.0, mx=0.0, my=1.0, status=1, active=True),
+        _ME(angle=math.pi / 2, distance=2.0, mx=2.0, my=0.0, status=1, active=True),
+        _ME(angle=-math.pi / 3, distance=1.4, mx=1.212, my=0.7, status=1, active=True),
+    ]
+    base_scan9 = [
+        _line_feat(0.0, 1.0, -0.5, 1.0, 0.5, 1.0),
+        _line_feat(math.pi / 2, 2.0, 2.0, -0.5, 2.0, 0.5),
+        _line_feat(-math.pi / 3, 1.4, 0.962, 1.133, 1.462, 0.267),
+    ]
+    true_dx9, true_dy9, true_dtheta9 = 0.06, -0.04, math.radians(5.0)
+    moved_scan9 = [_shift(f, true_dx9, true_dy9, true_dtheta9) for f in base_scan9]
+
+    # Guess is close to (not equal to) the true correction, mirroring how
+    # search() is actually called mid-run (working_pose already close from
+    # a previous iteration) -- and, critically, NONZERO, which is the one
+    # condition needed to exercise the dropped-offset bug class. It must
+    # NOT be so far from the true pose that the residual exceeds this
+    # module's own SEARCH_DXY_MAX_M/SEARCH_DTHETA_MAX_RAD window, or the
+    # test would be checking window coverage instead of offset correctness.
+    guess_x9, guess_y9, guess_theta9 = 0.05, -0.03, math.radians(4.0)
+    result9 = search(moved_scan9, map_e9,
+                      guess_x=guess_x9, guess_y=guess_y9, guess_theta=guess_theta9)
+    assert result9.valid, f"T9 expected valid result at nonzero guess, got {result9}"
+    assert abs((guess_x9 + result9.dx) - true_dx9) < 0.03, \
+        f"T9 dx off at nonzero guess (regression check for the dropped-offset " \
+        f"bug class): {result9}"
+    assert abs((guess_y9 + result9.dy) - true_dy9) < 0.03, \
+        f"T9 dy off at nonzero guess: {result9}"
+    assert abs((guess_theta9 + result9.dtheta) - true_dtheta9) < math.radians(3.0), \
+        f"T9 dtheta off at nonzero guess: {result9}"
+    print(f"  T9 PASS  end-to-end recovery correct at a NONZERO guess "
+          f"(guess=({guess_x9},{guess_y9},{math.degrees(guess_theta9):.1f}deg) "
+          f"+ delta -> absolute ({guess_x9+result9.dx:.4f},"
+          f"{guess_y9+result9.dy:.4f},"
+          f"{math.degrees(guess_theta9+result9.dtheta):.2f}deg) "
+          f"vs true ({true_dx9},{true_dy9},{math.degrees(true_dtheta9):.1f}deg))")
 
     print()
     print("All tests passed.")
