@@ -127,12 +127,22 @@ Briefly explain the architecture.
 
 ## Hardware Requirements
 
-| Sr. No. | Component | Specification | Quantity | Purpose |
-| ------- | --------- | ------------- | -------- | ------- |
-| 1       |           |               |          |         |
-| 2       |           |               |          |         |
-| 3       |           |               |          |         |
-| 4       |           |               |          |         |
+## Hardware Requirements
+
+| Sr. No. | Component | Specification | Model | Quantity | Unit |
+|:---:|---|---|---|:---:|:---:|
+| 1 | Motor Driver Module | TB6612FNG Module Performance Ultra Small Dual 3 PI Matching Performance Ultra L298N | TB6612FNG | 4 | pcs |
+| 2 | Motors | TT Motor - N25 12V 75RPM Metal Gear Motor | N25 | 4 | pcs |
+| 3 | Wheels | Robot Wheel 70mm Diameter × 20mm Width | — | 4 | pcs |
+| 4 | Microcontroller | Raspberry Pi 4 Model B with 2GB RAM | Raspberry Pi 4 B | 3 | pcs |
+| 5 | SD Card | SanDisk Ultra Micro SD 16GB UHS-I, 98MB/s | — | 4 | pcs |
+| 6 | Battery | Pro-Range A Grade NMC N18650CH 11.1V 4400mAh 2C 3S2P Li-ion Battery Pack with DC Jack Female & Amass Nylon-T | 11.1V 4400mAh 2C 3S2P Li-ion | 4 | pcs |
+| 7 | LiDAR | RPLiDAR A1M8 360 Degree Laser Range Finder | RP LiDAR A1M8 | 3 | pcs |
+| 8 | Gyroscope / Accelerometer | MPU6500 6-Axis Gyro Accelerometer DMP Motion Sensor | MPU6500 | 4 | pcs |
+| 9 | Converter | LM2596S DC-DC Buck Converter Power Supply | Buck Converter | 4 | pcs |
+| 10 | Cable | Micro USB Cable 50cm Fast-Charge Durable | Micro USB | 4 | pcs |
+| 11 | Filament | Numakers PLA+ Filament – Pure White (1.75mm) / PLA+ | PLA+ | 1 | pcs |
+| 12 | Passive Roller | Ball caster wheel Small-3pcs (Without Cap) | — | 3 | pcs |
 
 ---
 
@@ -360,41 +370,103 @@ Video Link: https://youtu.be/-i1T_cCoHbY
 
 ## Applications
 
-Mention real-world applications of the project.
+## Applications
 
-1.
-2.
-3.
-4.
+1. Disaster Management & Search and Rescue
+   - Multiple AGVs can collaboratively search disaster-affected areas and locate victims.
+   - If one AGV fails, the remaining vehicles can continue the mission.
+
+2. Defense & Surveillance
+   - Can be used for autonomous surveillance and monitoring of restricted or high-risk areas.
+   - Fault detection improves reliability during long-duration missions.
+
+3. Hazardous Environment Monitoring
+   - Suitable for environments involving toxic gases, fire, radiation, or other hazardous conditions.
+   - AGVs can collect and share environmental data while keeping humans away from dangerous areas.
+
+4. Industrial Automation
+   - Multiple AGVs can transport materials and perform inspection tasks in factories.
+   - Tasks can be reassigned when an AGV becomes unavailable.
+
+5. Warehouse & Logistics
+   - Can be used for autonomous transportation and delivery of goods inside warehouses.
+   - Swarm coordination helps distribute tasks among multiple AGVs.
+
+6. Infrastructure Inspection
+   - Can inspect tunnels, pipelines, bridges, roads, and industrial facilities.
+   - Multiple AGVs can cover different areas simultaneously.
 
 ---
 
 ## Advantages
 
-1.
-2.
-3.
-4.
+## Advantages
+
+1. Decentralised Operation
+   - AGVs can make local decisions and coordinate with neighbouring vehicles without relying completely on a central controller.
+
+2. Fault Tolerance
+   - Communication, motor, sensor, and behavioural faults can be detected during operation.
+
+3. Continuous Mission Operation
+   - Failure of one AGV does not necessarily stop the entire swarm.
+
+4. Dynamic Task Reallocation
+   - Tasks of a faulty or unavailable AGV can be reassigned to other available AGVs.
+
+5. Improved Area Coverage
+   - Multiple AGVs can explore and monitor different areas simultaneously, reducing mission time.
+
+6. Scalable and Flexible
+   - Additional AGVs can be integrated into the swarm, making the system suitable for different mission sizes.
 
 ---
 
 ## Limitations
 
-1.
-2.
-3.
-4.
+## Limitations
+
+1. Communication Dependency
+   - Reliable communication between AGVs is required for effective swarm coordination.
+   - Communication loss or interference can affect information sharing and task coordination.
+
+2. Limited Battery Life
+   - AGVs have limited operating time due to battery capacity.
+   - Frequent recharging or battery replacement may be required for long-duration missions.
+
+3. Sensor Limitations
+   - Sensor accuracy can be affected by dust, obstacles, lighting conditions, reflections, and environmental interference.
+
+4. Complex Fault Detection
+   - Detecting all possible hardware and behavioural faults in real time can be challenging.
+   - Some faults may require additional sensors or advanced diagnostic algorithms.
+
+5. Computational Requirements
+   - Real-time mapping, navigation, communication, and fault detection require sufficient processing power.
+   - More complex swarm operations may require higher-performance computing hardware.
+
+6. Environmental Constraints
+   - Uneven terrain, narrow passages, dynamic obstacles, and unknown environments can affect navigation and swarm coordination.
+   - Performance may decrease in highly unpredictable environments.
 
 ---
 
-## Future Scope
+## Future Scope 
 
-Mention possible improvements.
+1. AI-Based Fault Prediction
+   - Machine learning can be integrated to predict motor, sensor, and communication faults before they occur.
 
-1.
-2.
-3.
-4.
+2. Advanced Swarm Intelligence
+   - Advanced swarm algorithms can be implemented for better task allocation, coordination, and autonomous decision-making among AGVs.
+
+3. Collaborative Mapping
+   - Multiple AGVs can collaboratively build and update a common map of unknown environments using LiDAR, cameras, and other sensors.
+
+4. Autonomous Mission Replanning
+   - The system can be extended to automatically replan paths and redistribute tasks when an AGV fails or the environment changes.
+
+5. Real-World Disaster and Defense Deployment
+   - The prototype can be further developed into rugged autonomous vehicles for real-world applications such as disaster response, search and rescue, surveillance, hazardous-area inspection, and defense operations.
 
 ---
 
