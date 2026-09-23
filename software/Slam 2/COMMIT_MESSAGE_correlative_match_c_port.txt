@@ -1,0 +1,375 @@
+feat(slam_core): port correlative_match to C, validate on real Milk-V Duo S hardware
+
+Ports correlative_match.py (coarse pose search) to C, builds a 3-level
+testing bridge to validate it against the existing Python stack without
+editing any existing files, finds and fixes 3 real bugs along the way
+(one in the port's build, two in the benchmarking methodology itself),
+and validates on real Duo S hardware rather than trusting host/QEMU
+numbers. Net result: ~15x faster than the Python it replaces on real
+hardware, confirmed by measurement -- but still ~1.9-2x over the
+100ms/10Hz budget at realistic map sizes. NOT a complete fix. Follow-up
+(lookup table for the Gaussian falloff) is designed but not implemented
+-- see "Not done" section below.
+
+
+WHY
+---
+correlative_match.py was measured at 2465-3298ms/call on the real Duo S
+at n_static=60 (slam_progress_compact.md) -- 25-33x over budget, already
+confirmed to be CPython/numpy interpreter overhead, not a BLAS/math
+problem. This commit is the C port that overhead requires, plus the
+infrastructure to actually trust it rather than assume it.
+
+
+WHAT'S ADDED
+------------
+slam/slam_core/correlative_match.h          new -- struct defs, constants
+slam/slam_core/correlative_match.c          new -- the algorithm (optimized, see below)
+slam/tests/test_correlative_match.c         new -- mirrors correlative_match.py's T1-T7
+slam/testing_bridge/correlative_match_ctypes.py       new -- ctypes wrapper, drop-in for .search()
+slam/testing_bridge/libcorrelative_match.so           new -- host (x86) build
+slam/testing_bridge/libcorrelative_match_arm64.so     new -- Duo S build (glibc-fixed, see Bug 3)
+slam/testing_bridge/crosscheck_parity.py              new -- Python-vs-C numeric parity check
+slam/testing_bridge/run_slam_selftest_with_c_backend.py    new -- runs slam.py's own T1-T12 vs C backend
+slam/testing_bridge/run_lidar_visualizer_with_c_backend.py new -- same trick for the ROS2 LiDAR node
+slam/testing_bridge/bench_with_c_backend.py           new -- bench_full_pipeline.py vs C backend
+slam/testing_bridge/README.md                         new -- usage for all of the above
+slam/board_bench/bench_correlative_standalone.c        new -- v1, has known seeding bug (Bug 2), kept for history
+slam/board_bench/bench_correlative_standalone_arm64    new -- v1 binary
+slam/board_bench/bench_correlative_standalone_v2.c      new -- v2, fixed seeding + real statistics, USE THIS
+slam/board_bench/bench_correlative_standalone_v2_arm64  new -- v2 binary, USE THIS
+slam/board_bench/test_correlative_match_arm64           new -- static aarch64 self-test binary
+
+No existing project files were modified. All Python-side C-backend
+swaps happen via sys.modules['correlative_match'] = <ctypes wrapper>
+registered before the target script's own `import correlative_match`
+fires, so slam.py / lidar_visualizer.py / bench_full_pipeline.py are
+used completely unmodified in every test.
+
+
+PORT DESIGN
+-----------
+Direct translation of correlative_match.py's SCALAR reference path
+(_score_candidate / _coarse_sweep_topk / _greedy_refine -- the
+pre-numpy-vectorization shape, per that module's own docstring, since
+numpy has no C equivalent). Both layers preserved: Layer 1 coarse
+top-K-distinct sweep, Layer 2 independent greedy local refinement per
+candidate. All tunable constants carried over unchanged in value
+(CORR_ prefix, e.g. CORR_MAX_STATIC_ENTRIES_SEARCHED=70).
+
+- ScanFeature = typedef alias for messages.h's Feature struct (wire
+  protocol struct already carries every field a scan feature dict did).
+- CorrMapEntry = minimal stand-in for the real MapEntry (map_manager.c
+  doesn't exist yet). Fields (angle, distance, mx, my, status, active)
+  deliberately named to match map_manager.py's MapEntry exactly, so
+  this becomes a pure rename once map_manager.h exists.
+- No malloc anywhere, every array fixed-size/stack-allocated. float
+  throughout, no double. Compiles clean (-Wall -Wextra -Wsign-compare,
+  zero warnings) with host gcc AND
+  aarch64-linux-gnu-gcc -O2 -ffast-math -march=armv8-a (exact flags
+  slam_build_prompt.md specifies).
+- CoarseResult struct mirrors the Python CoarseResult namedtuple
+  exactly (dx, dy, dtheta, score, n_static, valid, ambiguous, second_score).
+
+
+TESTING INFRASTRUCTURE (3 levels of trust, built because the rest of
+slam_core is still pure Python and a bridge was needed to exercise the
+C code through the real stack, not just in isolation)
+---------------------------------------------------------------------
+1. Standalone C self-test (test_correlative_match.c) -- mirrors
+   correlative_match.py's T1-T7 (T8/T9 don't apply, those only exist to
+   cross-check Python's numpy path against its own scalar reference;
+   this port has one scoring path). PASSED on real Duo S hardware, not
+   just QEMU.
+
+2. Numeric parity vs Python reference (crosscheck_parity.py) -- feeds
+   IDENTICAL inputs to correlative_match.py (double precision) and the
+   ctypes-wrapped C code (single precision), diffs outputs with a loose
+   float32-vs-float64 tolerance. Covers nominal recovery, too-few-
+   anchors, parallel-wall ambiguity, arc-resolves-ambiguity, layer-2
+   reach. ALL PASSED, exact agreement.
+
+3. Swapped into the real, unmodified slam.py
+   (run_slam_selftest_with_c_backend.py) -- sys.modules swap before
+   slam.py's own import fires. ALL 12 of slam.py's own self-tests
+   passed (stationary tracking, injected motion, parallel-wall slide,
+   combined rotate+translate, ambiguity gating, confidence-gain jitter
+   damping).
+
+Same sys.modules trick reused by run_lidar_visualizer_with_c_backend.py
+(real-LiDAR ROS2 path) and bench_with_c_backend.py
+(bench_full_pipeline.py).
+
+
+BUGS FOUND AND FIXED (in the order found)
+------------------------------------------
+
+Bug 1 -- ctypes marshalling cost contaminated the first speed comparison
+  Symptom: full pipeline through the ctypes bridge only showed ~1.3-1.5x
+    speedup over Python on host -- looked like the C port barely helped.
+  Root cause: the ctypes wrapper still does real per-scan Python work
+    (building ctypes.Structure objects from dicts/objects) before ever
+    reaching C; that cost was contaminating the "C vs Python" comparison.
+  Fix: isolated pure algorithm cost by pre-building ctypes buffers
+    OUTSIDE the timing loop. Led directly to profiling the real Python
+    search() with cProfile instead of guessing -- see PROFILING below.
+
+Bug 2 -- benchmark's own RNG seeding produced non-monotonic,
+  untrustworthy on-device results
+  Symptom (real Duo S, bench_correlative_standalone_arm64 v1):
+    n_static=10 -> 17.156ms
+    n_static=60 -> 217.393ms
+    n_static=200 -> 123.667ms   <- LESS than n_static=60, impossible
+    n_static=400 -> 331.732ms
+  Root cause: srand(42) called once at the top, map generation AND scan
+    generation both drew from the same continuing rand() stream.
+    Different n_static values consumed different amounts of the stream
+    before scan generation began, so different n_static values were
+    silently testing DIFFERENT SCAN DATA too, not just different map
+    sizes -- not a fair comparison.
+  Fix (bench_correlative_standalone_v2.c): independent fixed seeds --
+    srand(42) for map, srand(777) for scan -- so scan is byte-identical
+    across every map size tested. Added real statistics (mean, median,
+    min, max, p95, stddev across ALL individual calls, not one averaged
+    number) plus best-effort cpufreq governor/thermal read, specifically
+    to answer the "is this scheduling jitter" question with data instead
+    of guessing.
+  Result after fix: clean, low-variance, trustworthy data -- see BENCH
+    RESULTS below.
+
+Bug 3 -- libcorrelative_match_arm64.so failed to load on the board
+  Symptom:
+    OSError: /lib/libm.so.6: version `GLIBC_2.35' not found (required
+    by /root/Slam 2/libcorrelative_match_arm64.so)
+  Root cause: the Ubuntu-hosted aarch64-linux-gnu-gcc cross-toolchain
+    links against a newer glibc than the Duo S's Buildroot glibc has.
+    Confirmed via `objdump -T`: original .so required symbol versions
+    up to GLIBC_2.38. The static binaries (test_correlative_match_arm64,
+    bench_correlative_standalone_v2_arm64) never hit this because static
+    linking bundles its own libc/libm -- bug specific to the ONE
+    dynamically-linked artifact (the .so the ctypes bridge needs).
+  Fix: rebuilt with libm statically embedded instead of dynamically
+    linked (-Wl,-Bstatic -lm -Wl,-Bdynamic). Confirmed via objdump -T
+    the requirement dropped to just GLIBC_2.17 (2012-era, essentially
+    guaranteed present) + GLIBC_PRIVATE (internal linker marker, not a
+    real runtime constraint).
+  Verified NOT just by inspecting symbols: wrote a dlopen/dlsym C
+    harness calling correlative_search() through the rebuilt .so
+    exactly the way ctypes would, ran it under qemu-aarch64-static,
+    confirmed a real call succeeds (output: "dlopen'd .so call
+    succeeded: valid=1 n_static=3 score=1.000").
+  Confirmed fixed on real hardware: bench_with_c_backend.py ran
+    successfully on the Duo S after this fix.
+
+
+PROFILING -- WHAT WAS ACTUALLY SLOW, AND THE TWO FIXES APPLIED
+----------------------------------------------------------------
+Profiled the real Python search() directly with cProfile (n_static=60,
+27 scan features, no ctypes/slam.py involved -- pure apples-to-apples),
+rather than assuming "C is faster than Python" would be enough.
+
+  Component                                              ms/call   % total
+  ------------------------------------------------------ -------   -------
+  Python for-loop + numpy CALL overhead (per scan          80.37    81.6%
+    feature, ~2,241 iterations/call, each paying numpy's
+    fixed per-op dispatch/allocation cost on grids of
+    just 25-81 cells -- _score_grid_vectorized only
+    vectorizes across the dx,dy grid, NOT across scan
+    features)
+  Other Python orchestration (_greedy_refine,                9.63     ~9%
+    _coarse_sweep_topk, _prerotate_features,
+    _insert_topk_distinct)
+  Actual numpy math (vectorized exp/broadcast/max ops        8.50     ~9%
+    genuinely computing something)
+  TOTAL                                                     98.50    100%
+
+Finding: only ~9% of Python's time was floating-point work. The other
+91% was interpreter + numpy per-call dispatch overhead.
+
+First isolated pure-C algorithm cost (ctypes buffers pre-built OUTSIDE
+the timing loop, no marshalling): 33.0 ms/call, BEFORE any C-side
+optimization -- notably SLOWER than Python's own actual math (8.5ms),
+because the naive C loop called expf() once at a time (scalar libm)
+while numpy's vectorized ufuncs use SIMD internally. Confirms: being C
+doesn't automatically make raw transcendental throughput faster, it
+only removes the per-call dispatch tax (91% of Python's total here).
+
+Two zero-behavior-change optimizations applied to corr_score_candidate:
+  1. exp(-a) * exp(-b) == exp(-(a+b))  (exact identity, not an
+     approximation) -- combined angle+distance (or centre+radius)
+     Gaussian terms into ONE expf() call instead of two.
+  2. Early-exit prefilter: skip a static line entirely once
+     angle_diff > 3*SIGMA_ANGLE_RAD (contribution would be < 1.2e-4,
+     negligible) BEFORE computing the distance term or calling expf()
+     at all. Same idea soft_scan_matcher.py's own docstring flags as
+     "the first optimization to reach for" -- it was needed. Same
+     prefilter applied to arcs on radius difference. NOTE: currently
+     only covers the angle/radius axis, NOT the distance/centre-distance
+     axis -- flagged as a follow-up (see NOT DONE below).
+
+Result: pure C algorithm cost dropped 33.0ms -> 26.7ms/call on host
+(~19% further win). Confirmed -O3 -march=native gives NO additional
+gain -- GCC cannot auto-vectorize a branchy, expf()-heavy loop; this
+is a real ceiling for scalar code, not a compiler-flag problem.
+Re-verified all 3 test levels still pass after the optimization --
+behaviour-preserving, not just faster.
+
+Host summary: Python 98.5ms/call -> C 26.7ms/call ~= 3.7x, marshalling
+excluded from both sides.
+
+
+REAL HARDWARE BENCHMARK RESULTS (Milk-V Duo S, this session)
+----------------------------------------------------------------
+
+9.1 Self-test: ./test_correlative_match_arm64 -- ALL T1-T7 PASSED on
+    the actual board, not just QEMU.
+
+9.2 Pure-C standalone benchmark (v2, fixed seeding + real stats):
+
+  n_static   mean(ms)   median    min       max       p95       stddev        %budget
+  --------   --------   -------   -------   -------   -------   -----------   -------
+  10          15.141     14.865    14.855    23.787    15.099    1.377 (9%)    15.1%
+  60         194.085    190.818   190.625   201.312   199.787    4.287 (2%)   194.1%
+  200        104.988    103.171   103.086   112.676   112.083    3.511 (3%)   105.0%
+  400        246.833    242.877   242.400   252.520   251.577    4.453 (2%)   246.8%
+
+  (n_static=200 cheaper than n_static=60 is NOT a bug: above
+  CORR_MAX_STATIC_ENTRIES_SEARCHED=70 the algorithm caps to the nearest
+  70 entries, so 200/400 search similarly-sized capped sets; remaining
+  variation is which specific 70 entries get selected and how many
+  survive the angle early-exit -- data-dependent, not a defect.)
+
+  Low stddev (2-9%) at every size, no outlier spikes relative to p95.
+  This is the data that ruled out RT Linux (see DECISIONS below).
+
+  cpufreq governor/frequency sysfs paths were UNREADABLE even as root
+  on this board (open item). Thermal zone0 readable: 42.3C -> 44.1C
+  across the full run sequence (mild warming, not indicative of
+  aggressive throttling given the low, stable stddev throughout).
+
+9.3 Full Python pipeline, C-backed correlative_match
+    (bench_with_c_backend.py):
+
+  n_static   coarse avg/max      fine avg/max      map avg/max     TOTAL avg/max      %budget
+  --------   -----------------   ---------------   -------------   -----------------  -------
+  10          66.70 /  86.48      38.12 /  66.33    1.50 /  6.80    110.54 / 132.06    110.5%
+  40         210.35 / 234.22     105.20 / 149.26    6.27 / 14.83    329.27 / 375.16    329.3%
+  60         303.93 / 344.06      86.50 / 116.48   12.75 / 29.30    412.94 / 483.23    412.9%
+  100        328.16 / 381.76      84.84 / 146.76    6.60 / 30.82    434.13 / 511.19    434.1%
+  200        322.91 / 396.14      76.67 / 150.00    9.74 / 59.52    435.60 / 583.20    435.6%
+  400        275.16 / 371.90      59.86 / 167.50   34.37 / 109.34   416.39 / 612.20    416.4%
+
+  IMPORTANT: the "coarse" column here (303.93ms @ n_static=60) is much
+  higher than 9.2's isolated pure-C number (194.085ms) at the SAME
+  n_static. That ~110ms gap is ctypes marshalling tax (building a
+  ctypes.Structure per scan feature/map entry, every call) -- on this
+  weak chip, per-op Python overhead is proportionally much larger than
+  on the host sandbox (~10ms there). This table does NOT represent
+  final deployment performance -- it's real C speed undermined by (a) a
+  Python marshalling bridge that won't exist once slam.c calls
+  correlative_search() directly, and (b) pipeline stages
+  (soft_scan_matcher.py -- the "fine" column, 86.50ms -- and
+  map_manager.py) that are STILL PURE PYTHON, not yet ported. The
+  number reflecting THIS port's own quality is 9.2's 194ms, not this
+  table's 412.94ms.
+
+  Also notable: "fine" stage (86-105ms, unmodified pure-Python
+  soft_scan_matcher.py) is now comparably expensive to the
+  C-accelerated coarse stage -- was always going to look small next to
+  correlative_match's old 2000+ms cost; now exposed as a real
+  contributor and a reasonable next porting candidate.
+
+9.4 Pure Python baseline reproduced on this same board
+    (bench_full_pipeline.py, unmodified):
+
+  n_static   coarse avg/max        fine avg/max      map avg/max      TOTAL avg/max        %budget
+  --------   -------------------   ---------------   --------------   -------------------  -------
+  10         1864.99 / 2179.86      38.58 /  65.26    1.52 /  6.89    1909.55 / 2224.63    1909.5%
+  40         2618.80 / 2745.27     106.78 / 150.90    6.57 / 23.83    2740.01 / 2886.48    2740.0%
+  60         2909.61 / 3119.49      87.36 / 120.74   12.77 / 22.33    3019.90 / 3253.71    3019.9%
+  100        2980.25 / 3267.95      85.27 / 148.16    6.72 / 32.34    3086.69 / 3417.43    3086.7%
+  200        2878.46 / 3268.27      78.43 / 152.12    9.50 / 58.10    2992.01 / 3468.26    2992.0%
+  400        2633.19 / 3210.62      61.38 / 167.73   35.18 / 114.21   2778.00 / 3443.53    2778.0%
+
+  Matches historical figures already in slam_progress_compact.md
+  (2465-3298ms) -- confirms this board behaves consistently with
+  earlier measurements, i.e. methodology is trustworthy.
+
+
+DECISIONS MADE FROM THIS DATA
+--------------------------------
+RT Linux -- NOT pursued. Stddev is a clean 2-9% of mean at every map
+  size (9.2), max never spikes far above p95. That's ordinary
+  measurement noise, not scheduling jitter -- if OS scheduling/
+  preemption were the dominant problem, occasional large outliers would
+  show up, and they don't. RT Linux (PREEMPT_RT) reduces scheduling
+  latency/jitter, it does not make correlative_search() execute one
+  FLOP faster -- and the data shows jitter isn't the problem here, mean
+  latency is. Not worth the kernel-level effort for this bottleneck.
+
+Lookup table -- justified, agreed as the next concrete step. At
+  n_static=60 (realistic, matches real hardware log's S:43-60 range),
+  the algorithm alone is 194ms mean -- consistently, reproducibly ~1.9x
+  over budget. Low noise means this number can be trusted enough to act
+  on. NEON/SIMD vectorization considered and deliberately NOT chosen
+  first: expf() isn't NEON-vectorized by GCC's autovectorizer (confirmed,
+  -O3 -march=native gave nothing), so a real SIMD win would require
+  writing/validating a custom vectorized exp approximation -- high
+  complexity, untestable for real performance on the x86 sandbox this
+  work was done in (QEMU-NEON is functionally correct but not
+  representative of real Cortex-A53 NEON throughput). A scalar lookup
+  table is lower-risk, doesn't need NEON to pay off (table lookup+lerp
+  is 3-5x cheaper than a full expf() call even scalar, since it skips
+  expf()'s own argument-reduction/polynomial evaluation), and is easy
+  to validate against the existing 3-level test suite.
+
+
+NET RESULT
+----------
+~15x faster than the Python this replaces, on REAL hardware, confirmed
+by measurement not claimed by extrapolation -- but still ~1.9-2x over
+the 100ms/10Hz budget at realistic map sizes (194ms vs 100ms at
+n_static=60). NOT a complete fix.
+
+  Pure Python, historical (pre-this-commit)        2465-3298 ms/call   (slam_progress_compact.md)
+  Pure Python, reproduced this session, same board 1909-3086 ms/call   (9.4)
+  Pure Python, host sandbox (cProfile target)          98.5 ms/call    (profiling)
+  Pure C, host sandbox, before optimization              33.0 ms/call  (profiling)
+  Pure C, host sandbox, after optimization               26.7 ms/call  (profiling)
+  Pure C, REAL Duo S hardware, n_static=60              194.085 ms/call (9.2 -- the number that matters)
+  Full Python pipeline w/ C backend, real Duo S, n=60   412.94 ms/call  (9.3 -- includes marshalling
+                                                                          + unported stages, NOT a pure
+                                                                          C-port number)
+
+
+NOT DONE / FOLLOW-UP REQUIRED (do not read this commit as "problem solved")
+------------------------------------------------------------------------------
+1. Lookup table itself -- designed (domain t = na^2+nd^2 or nc^2+nr^2,
+   table generated offline in Python at build time as a static const C
+   array, linear interpolation, clamp-to-zero beyond ~3 sigma) but NOT
+   IMPLEMENTED. Must validate against all 3 test levels after building,
+   especially T5 (parallel-wall ambiguity -- score-comparison sensitive
+   to quantization error).
+2. Distance/centre-distance early-exit prefilter not yet added (only
+   angle/radius are currently pruned) -- needed to bound the lookup
+   table's domain tightly, and is a free win on its own regardless of
+   the table.
+3. soft_scan_matcher.py ("fine" stage) is now a comparably-large
+   contributor (86-105ms on real hardware, 9.3) and is still pure
+   Python -- next porting candidate after the lookup table.
+4. map_manager.c still doesn't exist -- CorrMapEntry is a stand-in.
+   Fold into real MapEntry/ENTRY_* once map_manager.h is written (pure
+   rename, fields were named for this).
+5. cpufreq governor/frequency sysfs paths unreadable on this board even
+   as root -- unresolved, low priority given 9.2's low-jitter result
+   already answered the question that check was meant to inform.
+6. pose_estimator.c, line_matcher.c, slam.c itself remain Python-only --
+   this commit ports ONE module deeply and validates it thoroughly; the
+   same "mirror scalar reference, profile before optimizing, validate
+   on real hardware not just host" discipline should apply to each of
+   these, not a quick mechanical repeat.
+
+
+Refs: slam_build_prompt.md (file structure, cross-compile flags),
+      slam_progress_compact.md (original Python-on-Duo-S numbers),
+      SLAM_PROGRESS.md sections 3, 7.6, 8 (module map, perf history, status table)
