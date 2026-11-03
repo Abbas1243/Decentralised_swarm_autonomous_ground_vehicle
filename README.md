@@ -31,28 +31,37 @@
 
 # 📌 Project Overview
 
-Swarm robotics is inspired by the collective behavior observed in nature such as ants, bees, and birds. It involves multiple autonomous robots coordinating with each other to accomplish complex tasks efficiently.
+Swarm robotics is inspired by the collective behavior observed in nature, such as ants, bees and birds. Many simple units working together can cover more ground, and tolerate the loss of individual units better, than a single capable unit.
 
-This project focuses on developing a **decentralized swarm of Autonomous Ground Vehicles (AGVs)** capable of collaborative operation without depending on a single central controller.
+This project focuses on the design and development of a **six-robot low-cost differential-drive robotic swarm for cooperative indoor exploration and mapping**.
 
-The proposed system combines autonomous navigation, mapping, localization, swarm intelligence, distributed decision-making, communication, and fault detection and recovery.
+Each robot is designed around an ESP32-WROOM-32E microcontroller mounted on a custom-designed PCB. The PCB integrates the motor driver and DC-DC buck converter, reducing the need for separate electronic modules and simplifying the overall hardware assembly.
 
-The system is designed to operate reliably even when an individual robot experiences a failure.
+Each robot is equipped with:
+- Six VL53L0X Time-of-Flight (ToF) distance sensors.
+- One MPU6050 six-axis IMU.
+- Two N20 geared DC motors with integrated wheel encoders.
+- Two 34 mm rubber drive wheels.
+- One ball caster.
+- One 7.4 V, 2600 mAh LiPo battery.
+
+The mechanical structure consists of a 3 mm laser-cut MDF base plate, custom 3D-printed PLA motor holders, a caster holder and spacers. M3 nuts and bolts are used for mechanical assembly.
+
+The current implementation assumes that the robots begin from predefined and known starting positions and orientations. Estimating unknown starting poses and automatically aligning independently initialized robot maps are considered future extensions.
+
 
 ### Key Capabilities
-
-* 🤖 Autonomous navigation
-* 🗺️ Mapping and localization
-* 📡 Robot-to-robot communication
-* 🧠 Decentralized decision-making
-* 🤝 Swarm intelligence
-* 🚨 Fault detection
-* 🔄 Fault recovery
-* 🧭 Path planning
-* 🚧 Obstacle avoidance
-* 🔀 Task reallocation
-* ⚙️ Distributed motion control
-
+Key Capabilities
+* 🤖 Low-cost differential-drive robots (ESP32 on custom PCB)
+* 📏 6-beam ToF sensing per robot
+* 🧭 Odometry from wheel encoders fused with IMU gyro
+* 🗺️ Per-robot SLAM using pose graph and scan matching
+* 🧩 Merging of all robots' observations into one map
+* 📡 Wi-Fi telemetry to a laptop and robot-to-robot pose sharing
+* 🚧 Reactive obstacle avoidance and wall following
+* 🧠 Decentralized exploration behaviour
+* 📊 Live map viewer and replayable data logs
+* 📐 Evaluation against tape-measured ground truth
 ---
 
 # 🎯 Problem Statement
@@ -125,25 +134,43 @@ Briefly explain the architecture.
 
 ---
 
-## Hardware Requirements
 
 ## Hardware Requirements
 
-| Sr. No. | Component | Specification | Model | Quantity | Unit |
-|:---:|---|---|---|:---:|:---:|
-| 1 | Motor Driver Module | TB6612FNG Module Performance Ultra Small Dual 3 PI Matching Performance Ultra L298N | TB6612FNG | 4 | pcs |
-| 2 | Motors | TT Motor - N25 12V 75RPM Metal Gear Motor | N25 | 4 | pcs |
-| 3 | Wheels | Robot Wheel 70mm Diameter × 20mm Width | — | 4 | pcs |
-| 4 | Microcontroller | Raspberry Pi 4 Model B with 2GB RAM | Raspberry Pi 4 B | 3 | pcs |
-| 5 | SD Card | SanDisk Ultra Micro SD 16GB UHS-I, 98MB/s | — | 4 | pcs |
-| 6 | Battery | Pro-Range A Grade NMC N18650CH 11.1V 4400mAh 2C 3S2P Li-ion Battery Pack with DC Jack Female & Amass Nylon-T | 11.1V 4400mAh 2C 3S2P Li-ion | 4 | pcs |
-| 7 | LiDAR | RPLiDAR A1M8 360 Degree Laser Range Finder | RP LiDAR A1M8 | 3 | pcs |
-| 8 | Gyroscope / Accelerometer | MPU6500 6-Axis Gyro Accelerometer DMP Motion Sensor | MPU6500 | 4 | pcs |
-| 9 | Converter | LM2596S DC-DC Buck Converter Power Supply | Buck Converter | 4 | pcs |
-| 10 | Cable | Micro USB Cable 50cm Fast-Charge Durable | Micro USB | 4 | pcs |
-| 11 | Filament | Numakers PLA+ Filament – Pure White (1.75mm) / PLA+ | PLA+ | 1 | pcs |
-| 12 | Passive Roller | Ball caster wheel Small-3pcs (Without Cap) | — | 3 | pcs |
+| Sr. No. | Component | Specification / Model | Quantity |
+|:---:|---|---|:---:|
+| 1 | Microcontroller | ESP32-WROOM-32E | 6 |
+| 2 | Custom PCB | ESP32, motor driver and buck converter integration | 6 |
+| 3 | Motor Driver | Integrated on custom PCB | 6 |
+| 4 | DC-DC Buck Converter | Integrated on custom PCB | 6 |
+| 5 | IMU | MPU6050 (6-axis) | 6 |
+| 6 | ToF Sensors | VL53L0X, 6 sensors per robot | 36 |
+| 7 | N20 Motors | Geared DC motors with integrated encoders | 12 |
+| 8 | Wheel Encoders | Integrated with N20 motors | 12 |
+| 9 | Battery | LiPo 7.4 V, 2600 mAh (2S) | 6 |
 
+
+##  Mechanical Components
+
+| Sr. No. | Component | Specification | Quantity |
+|:---:|---|---|:---:|
+| 1 | Base Plate | 3 mm MDF, laser cut | 6 |
+| 2 | Drive Wheels | 34 mm Mini Car N20 Motor Wheel, rubber | 12 |
+| 3 | Caster Wheel | Mini 3Pi Car N20 Caster Robot Ball Wheel | 6 |
+| 4 | Motor Holders | PLA 3D printed | 6 sets |
+| 5 | Caster Holders | PLA 3D printed | 6 sets |
+| 6 | Spacers | PLA 3D printed | 6 sets |
+| 7 | Fasteners | M3 nut-and-bolt assembly | As required |
+
+
+##  Mechanical and Sensor Component Specifications
+
+| Sr. No. | Component | Model / Specification | Quantity | Product Link |
+|:---:|---|---|:---:|---|
+| 1 | N20 DC Gear Motor | 3V, 150 RPM, with integrated encoder | 12 | [Robu.in](https://robu.in/product/n20-3v-150rpm-micro-metal-gear-motor-with-encoder/) |
+| 2 | ToF Distance Sensor | VL53L0X, I2C interface | 36 | [Robu.in](https://robu.in/product/vl53l0x-tof-based-lidar-laser-distance-sensor/) |
+| 3 | Drive Wheel | 34 mm Mini Car N20 Motor Wheel, Rubber | 12 | [Robu.in](https://robu.in/product/34mm-mini-car-n20-motor-wheel-rubber-small-wheel/) |
+| 4 | Caster Wheel | Mini 3Pi Car N20 Caster Robot Ball Wheel | 6 | [Robu.in](https://robu.in/product/mini-3pi-car-n20-caster-robot-ball-wheel/) |
 ---
 
 ## Software Requirements
@@ -370,103 +397,101 @@ Video Link: https://youtu.be/-i1T_cCoHbY
 
 ## Applications
 
-## Applications
+1. Education and Research
+   - A cheap platform for students and labs to study multi-robot SLAM and swarm behaviour without expensive sensors.
 
-1. Disaster Management & Search and Rescue
-   - Multiple AGVs can collaboratively search disaster-affected areas and locate victims.
-   - If one AGV fails, the remaining vehicles can continue the mission.
+2. Indoor Mapping of Unknown Spaces
+   - Multiple low-cost robots can map rooms or corridors faster than one robot.
 
-2. Defense & Surveillance
-   - Can be used for autonomous surveillance and monitoring of restricted or high-risk areas.
-   - Fault detection improves reliability during long-duration missions.
+3. Search and Rescue (Prototype Level)
+   - Many inexpensive, expendable robots can explore collapsed or hazardous indoor areas.
 
-3. Hazardous Environment Monitoring
-   - Suitable for environments involving toxic gases, fire, radiation, or other hazardous conditions.
-   - AGVs can collect and share environmental data while keeping humans away from dangerous areas.
+4. Industrial and Warehouse Inspection
+   - Small robots can map aisles and detect layout changes, cheaply and in parallel.
 
-4. Industrial Automation
-   - Multiple AGVs can transport materials and perform inspection tasks in factories.
-   - Tasks can be reassigned when an AGV becomes unavailable.
+5. Hazardous Environment Exploration
+   - Low-cost units can be risked in places that are unsafe for people.
 
-5. Warehouse & Logistics
-   - Can be used for autonomous transportation and delivery of goods inside warehouses.
-   - Swarm coordination helps distribute tasks among multiple AGVs.
-
-6. Infrastructure Inspection
-   - Can inspect tunnels, pipelines, bridges, roads, and industrial facilities.
-   - Multiple AGVs can cover different areas simultaneously.
+6. Platform for Larger Swarm Experiments
+   - The design can scale to more robots because each unit is inexpensive.
 
 ---
 
 ## Advantages
 
-## Advantages
 
-1. Decentralised Operation
-   - AGVs can make local decisions and coordinate with neighbouring vehicles without relying completely on a central controller.
+1. **Low-Cost Hardware Architecture**
 
-2. Fault Tolerance
-   - Communication, motor, sensor, and behavioural faults can be detected during operation.
+   Uses ESP32 microcontrollers and integrated custom PCBs instead of expensive onboard computing platforms.
 
-3. Continuous Mission Operation
-   - Failure of one AGV does not necessarily stop the entire swarm.
+2. **Six-Robot Experimental Platform**
 
-4. Dynamic Task Reallocation
-   - Tasks of a faulty or unavailable AGV can be reassigned to other available AGVs.
+   Allows investigation of multi-robot cooperation rather than limiting experimentation to a single robotic platform.
 
-5. Improved Area Coverage
-   - Multiple AGVs can explore and monitor different areas simultaneously, reducing mission time.
+3. **Custom PCB Integration**
 
-6. Scalable and Flexible
-   - Additional AGVs can be integrated into the swarm, making the system suitable for different mission sizes.
+   Integrates the microcontroller, motor driver and buck converter on a common PCB, reducing separate modules and wiring.
+
+4. **Modular Mechanical Design**
+
+   Laser-cut MDF and 3D-printed PLA components make mechanical modifications and replacement easier.
+
+5. **ROS 2 Integration**
+
+   Provides a flexible software environment for developing robot communication, mapping and visualization.
+
+6. **Scalable Experimental Architecture**
+
+   Provides a foundation for studying the addition of further robots, subject to communication, processing and hardware limitations.
+
+7. **Practical Engineering Experience**
+
+   Involves PCB development, embedded programming, mechanical design, 3D printing, ROS 2 and multi-robot system integration.
 
 ---
 
 ## Limitations
 
-## Limitations
+1. Sparse and Short-Range Sensing
+   - VL53L0X sensors are single-zone, with about a 25 degree cone and a practical indoor range of about 1.2 m, worse on dark, glossy or sunlit surfaces. Scans are sparse compared with lidar.
 
-1. Communication Dependency
-   - Reliable communication between AGVs is required for effective swarm coordination.
-   - Communication loss or interference can affect information sharing and task coordination.
+2. Centralized Mapping
+   - Mapping and optimization run on the laptop, so the system is not fully decentralized and depends on the laptop and Wi-Fi link for the merged map.
 
-2. Limited Battery Life
-   - AGVs have limited operating time due to battery capacity.
-   - Frequent recharging or battery replacement may be required for long-duration missions.
+3. Accuracy Gain Only Where Paths Overlap
+   - Away from overlapping regions each robot drifts like a single robot. Wheel slip and heading drift dominate odometry error.
 
-3. Sensor Limitations
-   - Sensor accuracy can be affected by dust, obstacles, lighting conditions, reflections, and environmental interference.
+4. Known Starting Poses
+   - The current scope assumes known starting poses. Merging with unknown starting poses is future work.
 
-4. Complex Fault Detection
-   - Detecting all possible hardware and behavioural faults in real time can be challenging.
-   - Some faults may require additional sensors or advanced diagnostic algorithms.
+5. Environment Sensitivity
+   - Symmetric rooms and long featureless corridors make scan matching less reliable.
 
-5. Computational Requirements
-   - Real-time mapping, navigation, communication, and fault detection require sufficient processing power.
-   - More complex swarm operations may require higher-performance computing hardware.
-
-6. Environmental Constraints
-   - Uneven terrain, narrow passages, dynamic obstacles, and unknown environments can affect navigation and swarm coordination.
-   - Performance may decrease in highly unpredictable environments.
+6. Battery and Communication Limits
+   - Limited battery life, and Wi-Fi channel sharing between the laptop link and robot-to-robot messages can cause packet loss.
 
 ---
 
 ## Future Scope 
 
-1. AI-Based Fault Prediction
-   - Machine learning can be integrated to predict motor, sensor, and communication faults before they occur.
+1. Unknown Starting Poses
+   - Align robots' maps without known starts using multi-resolution correlative matching of submaps, with strict acceptance gates (score, overlap, margin, repeated consistency) to prevent wrong merges, and a measured false-merge rate in symmetric arenas.
 
-2. Advanced Swarm Intelligence
-   - Advanced swarm algorithms can be implemented for better task allocation, coordination, and autonomous decision-making among AGVs.
+2. Inter-Robot Relative Observations
+   - Use rendezvous or markers to add direct robot-to-robot constraints to the pose graph.
 
-3. Collaborative Mapping
-   - Multiple AGVs can collaboratively build and update a common map of unknown environments using LiDAR, cameras, and other sensors.
+3. Sensor Upgrade
+   - Move to multizone ToF sensors (for example VL53L5CX) for denser scans if the VL53L0X array proves too sparse. Cost, size and driver complexity must be checked first.
 
-4. Autonomous Mission Replanning
-   - The system can be extended to automatically replan paths and redistribute tasks when an AGV fails or the environment changes.
+4. More Decentralized Mapping
+   - Move parts of mapping onto the robots, and elect a robot to run optimization, as in the ETH swarm work.
 
-5. Real-World Disaster and Defense Deployment
-   - The prototype can be further developed into rugged autonomous vehicles for real-world applications such as disaster response, search and rescue, surveillance, hazardous-area inspection, and defense operations.
+5. Fault Detection and Task Reallocation
+   - Carry over ideas from the earlier project: detect communication, sensor and motor faults, and reassign exploration to other robots.
+
+6. Ground-Truth Evaluation
+   - Overhead camera with printed markers on the robots for pose error over time, used for evaluation only.
+
 
 ---
 
