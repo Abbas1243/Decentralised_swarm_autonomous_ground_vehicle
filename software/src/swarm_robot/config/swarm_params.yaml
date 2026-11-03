@@ -1,0 +1,15 @@
+swarm_agent:
+  ros__parameters:
+    neighbor_radius: 3.0
+    desired_spacing: 0.6
+    critical_distance: 0.3
+    max_linear_speed: 0.3
+    max_angular_speed: 1.5
+    boids_weight: 0.6
+    consensus_weight: 0.4
+    consensus_gain: 0.15
+    stale_timeout_sec: 2.0
+    control_rate_hz: 10.0
+    boids_separation_weight: 1.5
+    boids_alignment_weight: 1.0
+    boids_cohesion_weight: 1.0

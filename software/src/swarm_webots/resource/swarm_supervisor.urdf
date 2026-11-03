@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<robot name="swarm_supervisor">
+  <webots>
+    <plugin type="swarm_webots.swarm_supervisor_driver.SwarmSupervisorDriver"/>
+  </webots>
+</robot>

@@ -1,0 +1,324 @@
+#VRML_SIM R2025a utf8
+# Rebuilt using only Webots built-in node types (Robot, Shape, HingeJoint,
+# GPS, Compass, etc.) -- deliberately NO EXTERNPROTO of any kind, since
+# those paths vary between Webots installs/versions and caused the previous
+# world to fail to load. This is a simple two-wheel differential-drive
+# robot with a caster ball, matching the device names robot_driver.py
+# expects ("left wheel motor", "right wheel motor", "gps", "compass").
+
+WorldInfo {
+  basicTimeStep 32
+}
+Viewpoint {
+  orientation -0.35 0.35 0.87 1.6
+  position 0 -6 8
+}
+Background {
+  skyColor [
+    0.6 0.7 0.8
+  ]
+}
+DirectionalLight {
+  direction 0.3 -0.3 -1
+  intensity 1.0
+}
+Solid {
+  translation 0 0 0
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.85 0.85 0.85
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 8 8 0.02
+      }
+    }
+  ]
+  name "floor"
+  boundingObject Box {
+    size 8 8 0.02
+  }
+}
+
+# --- Pool of robots. Only the ones the swarm_manager "activates" are inside
+#     the arena; the rest start parked far outside (see PARK_POSITION in
+#     swarm_supervisor_driver.py) so they're invisible to the swarm until
+#     told to join. Add/remove blocks (and update ROBOT_POOL in both launch
+#     files) to change the max swarm size n. ---
+
+DEF robot_0 Robot {
+  translation -1.0 0.0 0.05
+  name "robot_0"
+  controller "<extern>"
+  children [
+    Shape {
+      appearance PBRAppearance { baseColor 0.2 0.6 0.9 roughness 0.6 metalness 0 }
+      geometry Box { size 0.15 0.1 0.05 }
+    }
+    GPS { }
+    Compass { }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.065 -0.02 }
+      device [ RotationalMotor { name "left wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "left wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.065 -0.02 }
+      device [ RotationalMotor { name "right wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 -0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "right wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    Solid {
+      translation 0.06 0 -0.035
+      children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 } geometry Sphere { radius 0.015 } } ]
+      name "caster"
+      boundingObject Sphere { radius 0.015 }
+      physics Physics { }
+    }
+  ]
+  boundingObject Box { size 0.15 0.1 0.05 }
+  physics Physics { density -1 mass 0.5 }
+}
+
+DEF robot_1 Robot {
+  translation 1.0 0.0 0.05
+  name "robot_1"
+  controller "<extern>"
+  children [
+    Shape { appearance PBRAppearance { baseColor 0.9 0.4 0.2 roughness 0.6 metalness 0 } geometry Box { size 0.15 0.1 0.05 } }
+    GPS { }
+    Compass { }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.065 -0.02 }
+      device [ RotationalMotor { name "left wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "left wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.065 -0.02 }
+      device [ RotationalMotor { name "right wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 -0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "right wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    Solid {
+      translation 0.06 0 -0.035
+      children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 } geometry Sphere { radius 0.015 } } ]
+      name "caster"
+      boundingObject Sphere { radius 0.015 }
+      physics Physics { }
+    }
+  ]
+  boundingObject Box { size 0.15 0.1 0.05 }
+  physics Physics { density -1 mass 0.5 }
+}
+
+DEF robot_2 Robot {
+  translation 0.0 1.0 0.05
+  name "robot_2"
+  controller "<extern>"
+  children [
+    Shape { appearance PBRAppearance { baseColor 0.3 0.8 0.3 roughness 0.6 metalness 0 } geometry Box { size 0.15 0.1 0.05 } }
+    GPS { }
+    Compass { }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.065 -0.02 }
+      device [ RotationalMotor { name "left wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "left wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.065 -0.02 }
+      device [ RotationalMotor { name "right wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 -0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "right wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    Solid {
+      translation 0.06 0 -0.035
+      children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 } geometry Sphere { radius 0.015 } } ]
+      name "caster"
+      boundingObject Sphere { radius 0.015 }
+      physics Physics { }
+    }
+  ]
+  boundingObject Box { size 0.15 0.1 0.05 }
+  physics Physics { density -1 mass 0.5 }
+}
+
+DEF robot_3 Robot {
+  translation 0.0 -1.0 0.05
+  name "robot_3"
+  controller "<extern>"
+  children [
+    Shape { appearance PBRAppearance { baseColor 0.8 0.8 0.2 roughness 0.6 metalness 0 } geometry Box { size 0.15 0.1 0.05 } }
+    GPS { }
+    Compass { }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.065 -0.02 }
+      device [ RotationalMotor { name "left wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "left wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.065 -0.02 }
+      device [ RotationalMotor { name "right wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 -0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "right wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    Solid {
+      translation 0.06 0 -0.035
+      children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 } geometry Sphere { radius 0.015 } } ]
+      name "caster"
+      boundingObject Sphere { radius 0.015 }
+      physics Physics { }
+    }
+  ]
+  boundingObject Box { size 0.15 0.1 0.05 }
+  physics Physics { density -1 mass 0.5 }
+}
+
+DEF robot_4 Robot {
+  translation 100.0 100.0 0.05
+  name "robot_4"
+  controller "<extern>"
+  children [
+    Shape { appearance PBRAppearance { baseColor 0.6 0.2 0.8 roughness 0.6 metalness 0 } geometry Box { size 0.15 0.1 0.05 } }
+    GPS { }
+    Compass { }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.065 -0.02 }
+      device [ RotationalMotor { name "left wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "left wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.065 -0.02 }
+      device [ RotationalMotor { name "right wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 -0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "right wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    Solid {
+      translation 0.06 0 -0.035
+      children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 } geometry Sphere { radius 0.015 } } ]
+      name "caster"
+      boundingObject Sphere { radius 0.015 }
+      physics Physics { }
+    }
+  ]
+  boundingObject Box { size 0.15 0.1 0.05 }
+  physics Physics { density -1 mass 0.5 }
+}
+
+DEF robot_5 Robot {
+  translation 101.0 100.0 0.05
+  name "robot_5"
+  controller "<extern>"
+  children [
+    Shape { appearance PBRAppearance { baseColor 0.2 0.8 0.8 roughness 0.6 metalness 0 } geometry Box { size 0.15 0.1 0.05 } }
+    GPS { }
+    Compass { }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 0.065 -0.02 }
+      device [ RotationalMotor { name "left wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "left wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    HingeJoint {
+      jointParameters HingeJointParameters { axis 0 1 0 anchor 0 -0.065 -0.02 }
+      device [ RotationalMotor { name "right wheel motor" maxVelocity 6.28 } ]
+      endPoint Solid {
+        translation 0 -0.065 -0.02
+        rotation 1 0 0 1.5708
+        children [ Shape { appearance PBRAppearance { baseColor 0.05 0.05 0.05 } geometry Cylinder { radius 0.033 height 0.02 } } ]
+        name "right wheel"
+        boundingObject Cylinder { radius 0.033 height 0.02 }
+        physics Physics { }
+      }
+    }
+    Solid {
+      translation 0.06 0 -0.035
+      children [ Shape { appearance PBRAppearance { baseColor 0.2 0.2 0.2 } geometry Sphere { radius 0.015 } } ]
+      name "caster"
+      boundingObject Sphere { radius 0.015 }
+      physics Physics { }
+    }
+  ]
+  boundingObject Box { size 0.15 0.1 0.05 }
+  physics Physics { density -1 mass 0.5 }
+}
+
+# Dedicated supervisor robot: no physical body needed, just gives ROS2 the
+# ability to teleport the robots above in/out of the arena.
+DEF swarm_supervisor Robot {
+  name "swarm_supervisor"
+  controller "<extern>"
+  supervisor TRUE
+}

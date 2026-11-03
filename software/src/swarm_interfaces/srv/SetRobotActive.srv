@@ -1,0 +1,6 @@
+string robot_id
+bool active
+geometry_msgs/Point spawn_position
+---
+bool success
+string message
