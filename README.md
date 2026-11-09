@@ -111,14 +111,54 @@ Mention its limitations:
 
 ## Proposed System
 
-Describe your proposed solution.
+### 1. System Overview
 
-Include:
+The proposed system consists of multiple low-cost ESP32-based mobile robots that independently handle real-time operations such as sensor acquisition, wheel odometry, PID-based motion control, and data transmission. Computationally intensive tasks, including mapping, scan matching, and pose graph optimization, are performed centrally on a laptop.
 
-- Main idea
-- How it works
-- Major components
-- Expected benefits
+The system uses a lightweight, open binary communication protocol to exchange sensor and odometry data over Wi-Fi. All transmitted data can also be stored in replayable logs, allowing offline algorithm development, testing, and evaluation.
+
+### 2. System Working Principle
+
+The system operates through the following sequence:
+
+1. **Safe Robot Initialization:** At power-up, all motor driver input pins are configured LOW to prevent unintended motor movement. The ESP32 then connects to the Wi-Fi network and initializes the onboard sensors.
+
+2. **Multi-Sensor Selection:** A custom-milled hub PCB uses a 74HC138 decoder and a 74HC04 inverter to select one of the six VL53L0X time-of-flight distance sensors at a time. Since all six sensors share the same default I2C address, the selection circuit enables individual sensor communication. The main PCB provides only two shutdown control lines.
+
+3. **Odometry and Motion Control:** The robot combines MPU6050 gyroscope measurements with wheel encoder feedback to estimate its movement. Gyroscope bias is calibrated during startup. PID controllers are implemented for wheel speed regulation, angular turning, and linear distance control.
+
+4. **Wireless Data Transmission:** Every 50 ms, each robot transmits a 36-byte binary data frame containing its estimated pose and distance measurements. Each frame includes the robot's own pose at the time of sensor acquisition, eliminating the need for clock synchronization between robots.
+
+5. **Sensor Coverage:** By rotating through a partial angle (ϕ), the robot achieves a theoretical sensor coverage of:
+
+   \[
+   \text{Coverage} = 120^\circ + \phi
+   \]
+
+   Therefore, a complete 360° coverage requires a 240° rotation.
+
+6. **Centralized Mapping and Optimization:** The laptop receives the transmitted frames and converts sensor measurements into world-coordinate points using a conical sensor model. It then performs scan matching, pose graph optimization, and map merging for robots with known initial positions. The resulting map and robot trajectories are visualized using RViz2.
+
+### 3. Expected Outcomes and Benefits
+
+The proposed system aims to provide the following benefits:
+
+- **Low-Cost Hardware:** A cost-effective and replicable multi-robot platform built around ESP32 microcontrollers.
+- **Modular Architecture:** Independent robot-level sensing, communication, odometry, and motion-control operations.
+- **Closed-Loop Motion Control:** Calibrated PID-based control for accurate wheel speed, turning, and distance movement.
+- **Sparse-Sensor Mapping:** An approach to mapping using six VL53L0X distance sensors, with clearly documented sensing limitations.
+- **Offline Development:** Replayable sensor and odometry logs for testing and improving mapping algorithms without requiring physical robot operation.
+- **System Validation:** A requirement-to-test structure that tracks implementation and verification status, ensuring that untested requirements remain clearly identified.
+
+### 4. Centralized vs. Decentralized Architecture
+
+The proposed system uses a **centralized mapping architecture with independent robot-level control**.
+
+- **Robot-Level Operations:** Each robot independently handles its motor control, sensor acquisition, odometry estimation, and wireless data transmission. Robots do not require communication with neighbouring robots to perform these operations.
+- **Centralized Operations:** Mapping, scan matching, pose graph optimization, and map merging are performed on a central laptop.
+- **Optimization Architecture:** The closest published system also performs optimization on a single elected robot. Therefore, the proposed system does not claim to implement fully decentralized SLAM.
+
+This distinction is important because independent robot operation does not necessarily imply decentralized mapping or SLAM.
 
 ---
 
@@ -130,7 +170,60 @@ Add block diagram or system architecture image here.
 ![System Architecture](images/system_architecture.png)
 ````
 
-Briefly explain the architecture.
+
+
+
+
+
+The proposed system follows a distributed architecture consisting of two main subsystems: an **ESP32-based Automated Guided Vehicle (AGV)** and a **Laptop-based ROS 2 processing system**. Both subsystems communicate wirelessly through Wi-Fi using UDP protocol for real-time data transmission and control.
+
+### 1. AGV – Sensing and Control
+
+The AGV is equipped with six VL53L0X Time-of-Flight (ToF) distance sensors, an MPU6050 IMU, and wheel encoders for environmental sensing and motion estimation.
+
+The ESP32, mounted on a custom PCB, processes sensor data, performs odometry calculations and PID-based motor control, and generates heading-stamped sensor frames. A DRV8833 motor driver controls two N20 motors configured in a differential-drive arrangement.
+
+### 2. Wireless Communication
+
+The AGV communicates with the laptop over Wi-Fi using UDP.
+
+- **Data Transmission:** The ESP32 sends 36-byte sensor data frames at 20 Hz to the laptop.
+- **Command Transmission:** The laptop sends 10-byte control commands (Drive/Stop) back to the ESP32.
+
+### 3. Laptop – ROS 2 Processing
+
+The laptop runs Ubuntu with ROS 2 Humble.
+
+- A UDP receiver collects incoming sensor data and logs it into CSV files.
+- The ROS 2 bridge processes and publishes odometry, sensor ranges, TF transforms, point clouds, and velocity commands.
+- The processed information is passed to the mapping pipeline for further computation.
+
+### 4. Mapping and Visualization
+
+The mapping pipeline consists of a scan builder, cone sensor model, and mapper.
+
+- **Scan Builder:** Converts incoming sensor measurements into scan data.
+- **Cone Sensor Model:** Models the sensor's field of view and measurements.
+- **Mapper:** Uses scan matching and pose graph techniques to build and optimize the environment map.
+- **Map Merger:** Combines mapping results for visualization.
+- **RViz2:** Displays the generated map and relevant robot data.
+
+### 5. Overall System Workflow
+
+The complete architecture follows the workflow:
+
+**Sensing → Processing → Wireless Communication → Mapping → Visualization**
+
+This modular architecture integrates embedded systems, real-time motor control, wireless communication, and ROS 2-based mapping to develop an AGV capable of sensing its surroundings and building an environment map.
+
+### Key Features
+
+- Real-time environmental sensing using ToF sensors.
+- ESP32-based onboard processing and PID motor control.
+- Wireless communication using UDP over Wi-Fi.
+- ROS 2-based sensor data processing.
+- Scan matching and pose graph-based mapping.
+- Real-time map visualization using RViz2.
 
 ---
 
@@ -175,56 +268,315 @@ Briefly explain the architecture.
 
 ## Software Requirements
 
-| Sr. No. | Software / Tool | Version | Purpose |
-| ------- | --------------- | ------- | ------- |
-| 1       |                 |         |         |
-| 2       |                 |         |         |
-| 3       |                 |         |         |
+The following software and development tools are required to run and develop the project.
 
+| Software / Tool | Purpose |
+|---|---|
+| Ubuntu | Operating system for ROS 2 processing |
+| ROS 2 Humble | Robot communication and data processing |
+| Python 3 | UDP receiver, data logging and mapping modules |
+| Arduino IDE | ESP32 firmware development and uploading |
+| RViz2 | Real-time sensor data and point cloud visualization |
+| NumPy | Numerical computations and data processing |
+| Matplotlib | Data visualization and plotting |
+| teleop_twist_keyboard | Keyboard-based AGV movement control |
+
+### Required Libraries
+
+**ESP32 Firmware Libraries**
+- `Adafruit_VL53L0X` – Interface with VL53L0X ToF sensors.
+- `Wire` – I2C communication with sensors and peripherals.
+- `WiFi` – Wireless network connectivity.
+- `WiFiUdp` – UDP-based wireless data transmission.
+
+**Python Libraries**
+- `numpy`
+- `matplotlib`
+
+### Additional Requirements
+- ESP32 Dev Module board support package.
+- 2.4 GHz Wi-Fi network for communication between AGV and laptop.
+- USB connection for ESP32 programming and serial monitoring (115200 baud).
 ---
 
 ## Technologies Used
 
-Mention technologies used in the project.
+The project combines embedded systems, wireless communication, robotics middleware and mapping algorithms.
 
-Example:
+| Technology | Application |
+|---|---|
+| ESP32 | Main microcontroller for AGV control and sensing |
+| Arduino Framework | Embedded firmware development |
+| ROS 2 Humble | Robot middleware and communication |
+| Python 3 | Data reception, logging and mapping pipeline |
+| UDP Protocol | Real-time wireless sensor data transmission |
+| Wi-Fi (2.4 GHz) | Communication between AGV and laptop |
+| I2C Protocol | Communication with ToF sensors and IMU |
+| PID Control | Closed-loop motor speed, distance and angle control |
+| Odometry | Estimation of robot position and orientation |
+| SLAM | Simultaneous localization and mapping |
+| Scan Matching | Alignment of sensor scans |
+| Pose Graph Optimization | Optimization of robot poses |
+| RViz2 | Visualization of sensor data and mapping results |
 
-* Embedded C / Python / JavaScript
-* Arduino / STM32 / ESP32 / Raspberry Pi
-* ROS / MATLAB / Simulink
-* Machine Learning / Computer Vision
-* IoT / Cloud / Mobile App
-* PCB Design / CAD Design
+### Mapping and Processing Techniques
+- Cone-based sensor modelling.
+- Partial-angle scan generation.
+- Scan-to-map matching.
+- Pose graph-based optimization.
+- Multi-robot map merging with known starting poses.
 
 ---
 
 ## Methodology
 
-Explain the step-by-step approach.
+The project follows a systematic development and implementation methodology to design and develop a low-cost swarm of ESP32-based differential-drive Automated Guided Vehicles (AGVs) for cooperative 2D indoor mapping. The methodology consists of the following stages:
 
-1. Literature survey
-2. Problem identification
-3. Requirement analysis
-4. System design
-5. Hardware/software development
-6. Integration
-7. Testing and validation
-8. Documentation and publication
+### 1. Literature Survey
 
+A detailed literature survey was conducted to understand existing approaches and identify suitable techniques for low-cost robotic mapping.
+
+- Study of 2D LiDAR-based SLAM techniques.
+- Review of scan matching algorithms such as ICP and Correlative Scan Matching.
+- Study of collaborative SLAM and swarm robotics.
+- Review of pose graph optimization techniques.
+- Exploration of low-cost and sparse range-sensing approaches using Time-of-Flight (ToF) sensors.
+- Study of existing frameworks such as Hector SLAM, Cartographer, slam_toolbox and tinySLAM.
+
+### 2. Problem Identification
+
+Existing multi-robot SLAM systems generally require expensive LiDAR sensors and powerful onboard computing platforms.
+
+- The initial Raspberry Pi 4-based architecture was found to be expensive.
+- The Milk-V Duo S architecture with RPLIDAR A1 faced computational limitations, with Python feature SLAM exceeding the 100 ms per-scan processing budget.
+- Therefore, a low-cost ESP32-based architecture was selected to reduce hardware cost while retaining essential sensing, motion control and wireless communication capabilities.
+
+### 3. Requirement Analysis
+
+Thirteen functional requirements (R1–R13) were defined with measurable acceptance criteria before testing.
+
+The requirements cover:
+
+- Hardware development and sensor integration.
+- Wireless communication and data transmission.
+- Safe motor operation and command-loss handling.
+- Robot geometry calibration and odometry.
+- ToF sensor accuracy and scan generation.
+- PID-based motion control.
+- ROS 2 integration and live visualization.
+- Scan matching and pose graph optimization.
+- Multi-robot map merging.
+- Data logging and system cost.
+
+Each requirement was linked to its corresponding design element and validation test.
+
+### 4. System Design
+
+The final architecture was divided into two major subsystems:
+
+**AGV Subsystem:**
+- ESP32-WROOM-32E microcontroller on a custom PCB.
+- Six VL53L0X ToF sensors arranged in a 120° front-facing arc.
+- MPU6050 IMU and wheel encoders.
+- Hub PCB using a 74HC138 decoder and 74HC04 inverter for sequential sensor selection.
+- DRV8833 motor drivers and two N20 geared motors in a differential-drive configuration.
+
+**Laptop Subsystem:**
+- Ubuntu operating system with ROS 2 Humble.
+- Python-based UDP receiver and CSV logger.
+- ROS 2 communication bridge.
+- Scan builder and cone-based sensor model.
+- Scan matching and pose graph optimization.
+- Map merging and RViz2 visualization.
+
+A binary UDP communication protocol was designed for wireless data exchange between the AGVs and laptop.
+
+### 5. Hardware and Software Development
+
+The hardware and software components were developed and implemented separately before integration.
+
+**Hardware Development:**
+- Design and fabrication of the custom ESP32 PCB.
+- Development of the sensor hub PCB.
+- 3D printing of the ToF sensor mounting arc and mechanical holders.
+- Assembly of the chassis, motors, wheels and power supply.
+- Integration of the IMU, encoders and six ToF sensors.
+
+**Software Development:**
+- ESP32 firmware for sensor acquisition, odometry and PID motor control.
+- Python-based UDP receiver and CSV data logger.
+- ROS 2 bridge for publishing odometry, sensor ranges, transforms and point clouds.
+- Python-based scan builder, sensor model, scan matcher and pose graph modules.
+- Development of a tinySLAM-style onboard scan-to-map matcher for synthetic testing.
+
+### 6. System Integration
+
+The system was integrated incrementally to identify and resolve hardware and software issues at each stage.
+
+The integration sequence followed:
+
+1. ESP32 firmware flashing and serial monitoring.
+2. Standalone UDP receiver testing.
+3. ROS 2 bridge integration.
+4. Sensor data visualization in RViz2.
+5. Keyboard-based AGV movement control.
+6. Hub PCB integration and sequential sensor initialization.
+7. Integration of all six ToF sensors and the MPU6050.
+8. Odometry calibration and PID controller tuning.
+9. Complete wireless communication and system testing.
+
+Each subsystem was checked before proceeding to the next integration stage.
+
+### 7. Mapping Methodology
+
+The mapping approach is based on a sparse pose-graph SLAM method adapted from the literature, particularly the approach described by Friess et al. The algorithm was independently reimplemented; the authors' GPL-3.0 source code was neither inspected nor copied.
+
+**Step 1 – Point Generation**
+- Convert each ToF measurement into a spatial point using the robot pose, sensor mounting angle and measured distance.
+- Use the heading estimate recorded at the time of measurement.
+- Combine the readings collected during a spin into a scan.
+
+**Step 2 – Pose Graph Construction**
+- Create one pose node for each robot waypoint.
+- Connect consecutive nodes using odometry constraints.
+- Store relative motion information between successive poses.
+
+**Step 3 – Scan Matching**
+- Match scans between nearby robot poses to estimate relative transformations.
+- Use Correlative Scan Matching to search for the best alignment over position (x, y) and orientation (θ).
+- Apply ICP refinement to improve the estimated alignment.
+- Add the resulting scan-matching constraints to the pose graph.
+
+**Step 4 – Pose Graph Optimization**
+- Apply Gauss–Newton optimization to minimize the error between measured and predicted relative poses.
+- Refine the estimated robot trajectory using odometry and scan-matching constraints.
+
+**Step 5 – Map Generation**
+- Re-project sensor scans using the optimized robot poses.
+- Combine the corrected points to generate the environment map.
+- Convert the resulting map into an occupancy grid for visualization.
+
+**Additional Improvements for Sparse ToF Sensing:**
+- Range-dependent cone-based sensor uncertainty modelling.
+- Treat invalid or no-return sensor readings as unknown.
+- Apply a short temporal median filter to reduce measurement noise.
+- Use Correlative Scan Matching before ICP refinement to improve alignment with sparse sensor data.
+
+### 8. Testing and Validation
+
+A structured validation plan consisting of twelve tests (T1–T12) was defined to evaluate the system against the thirteen requirements.
+
+Testing was conducted in different environments depending on the requirement:
+
+- **Bench Testing:** Sensor initialization, hardware operation, calibration and motor safety.
+- **Arena Testing:** Robot movement, turning accuracy, sensor measurements and wireless communication.
+- **Replay Testing:** Processing recorded sensor logs on the laptop.
+- **Simulation Testing:** Evaluation of mapping algorithms using synthetic data.
+
+The validation process included:
+
+- Sensor range accuracy and measurement noise.
+- UDP transmission rate and packet loss.
+- Command-loss safety and motor stopping response.
+- Wheel odometry and PID motion accuracy.
+- Sensor scan generation and RViz2 visualization.
+- Scan matching and mapping performance.
+- Multi-robot map merging.
+
+
+### 9. Documentation and Publication
+
+- Document the hardware design, software implementation and system architecture.
+- Maintain source code, configuration files and reproducible test logs.
+- Record the results, limitations and future improvements.
+- Prepare the final BE project report and research paper.
+- Publish the project documentation and implementation details on GitHub.
+
+---
+
+### Key Design Calculations
+
+The following calculations were considered during system design and sensor modelling:
+
+**1. Heading Error**
+
+The lateral displacement caused by heading error is approximately:
+
+\[
+\epsilon_\perp \approx d\Delta\psi
+\]
+
+A heading error of 1° produces approximately 1.7 cm of lateral displacement for a point 1 m away.
+
+**2. Sensor Cone Uncertainty**
+
+The approximate lateral uncertainty is:
+
+\[
+\sigma_\perp \approx d\tan(\beta)
+\]
+
+For a 25° sensor cone, the uncertainty is approximately 0.44 m at a distance of 1 m, contributing to thick walls and reduced map accuracy.
+
+**3. Sensor Sweep Time**
+
+Since the six ToF sensors are read sequentially:
+
+\[
+T_{sweep}=N(t_b+t_{sel})
+\]
+
+Where:
+- \(N\) = Number of sensors (6).
+- \(t_b\) = Sensor ranging time.
+- \(t_{sel}\) = Sensor selection, wake-up and configuration time.
+
+With a 33 ms timing budget and assuming zero selection overhead, the calculated lower bound is approximately 200 ms. The actual selection time has not yet been measured on the robot.
+
+**4. Spin Scan Coverage**
+
+The total angular coverage is:
+
+\[
+\Theta=120^\circ+\phi
+\]
+
+Where \(\phi\) is the robot's spin angle. Full 360° coverage requires a 240° spin, taking approximately 5.3 seconds at 45°/s.
+
+---
+
+### Risk Management
+
+| Risk ID | Identified Risk | Mitigation Strategy |
+|---|---|---|
+| K1 | Project schedule constraints | Prioritize motion control, scanning and mapping; freeze features when required. |
+| K2 | Sparse or noisy ToF measurements | Perform sensor characterization and consider multizone sensors. |
+| K3 | Heading drift affecting scan accuracy | Calibrate gyro bias, use closed-loop turns and stop-and-scan operation. |
+| K4 | Incorrect scan matching in symmetric environments | Use asymmetric obstacles, residual checks and known starting positions. |
+| K5 | Difficulty explaining implementation and contributions | Maintain contribution records, disclose AI assistance and conduct code walkthroughs. |
+
+---
+
+### Overall Methodology Workflow
+
+**Literature Survey → Problem Identification → Requirement Analysis → System Design → Hardware & Software Development → System Integration → Mapping & Optimization → Testing & Validation → Documentation & Publication**
+
+**Expected Outcome:** A low-cost, modular and scalable ESP32-based AGV platform designed for cooperative 2D indoor mapping using sparse ToF sensing, wireless communication and ROS 2-based processing.
 ---
 
 ## Project Timeline
 
-| Week / Month | Task Planned          | Status                            |
-| ------------ | --------------------- | --------------------------------- |
-| Week 1       | Problem finalization  | Pending / In Progress / Completed |
-| Week 2       | Literature survey     |                                   |
-| Week 3       | Requirement analysis  |                                   |
-| Week 4       | System design         |                                   |
-| Week 5       | Prototype development |                                   |
-| Week 6       | Testing               |                                   |
-| Week 7       | Documentation         |                                   |
-| Week 8       | Paper writing         |                                   |
+| Week | Task Planned | Status |
+|:---:|---|:---:|
+| Week 1 | Problem finalization (final architecture fixed after Phase 1 and Phase 2) | Completed |
+| Week 2 | Literature survey | Completed |
+| Week 3 | Requirement analysis (R1 to R13, T1 to T12) | Completed |
+| Week 4 | System design (Main PCB, Hub PCB, arc, and communication protocol) | Completed |
+| Week 5 | Prototype development (Robot assembly; 4 out of 6 robots operational) | In Progress |
+| Week 6 | Testing and validation (T1 to T12) | completed |
+| Week 7 | Project documentation | completed  |
+| Week 8 | Research paper writing | completed |
+
 
 ---
 
