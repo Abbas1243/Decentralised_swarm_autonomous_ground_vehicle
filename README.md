@@ -163,8 +163,7 @@ This distinction is important because independent robot operation does not neces
 
 ## System Architecture
 
-![System Architecture](images/system_architecture.png)
-
+![System Architecture](images/AGV%20System%20Architecture%20Infographic.png)
 
 
 
