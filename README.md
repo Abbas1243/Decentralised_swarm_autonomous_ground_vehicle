@@ -324,6 +324,8 @@ The project combines embedded systems, wireless communication, robotics middlewa
 
 ## Methodology
 
+![Methodology](images/methodology.jpeg)
+
 The project follows a systematic development and implementation methodology to design and develop a low-cost swarm of ESP32-based differential-drive Automated Guided Vehicles (AGVs) for cooperative 2D indoor mapping. The methodology consists of the following stages:
 
 ### 1. Literature Survey
@@ -617,11 +619,9 @@ Add circuit diagram image here.
 
 ## Flowchart / Algorithm
 
-Add flowchart image here.
+![Flowchart and Algorithm](images/Robotics%20Flowchart%20and%20Algorithm%20Pipeline.png)
 
-```markdown
-![Flowchart](images/flowchart.png)
-```
+
 
 ### Algorithm
 
