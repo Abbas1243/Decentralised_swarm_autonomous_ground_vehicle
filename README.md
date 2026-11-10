@@ -163,11 +163,7 @@ This distinction is important because independent robot operation does not neces
 
 ## System Architecture
 
-Add block diagram or system architecture image here.
-
-```markdown
 ![System Architecture](images/system_architecture.png)
-````
 
 
 
