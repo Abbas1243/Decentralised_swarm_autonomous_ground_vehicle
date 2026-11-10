@@ -66,11 +66,10 @@ Key Capabilities
 
 # 🎯 Problem Statement
 
-Most swarm robotic systems currently exist in a **centralized architecture**, where a central controller is responsible for coordinating the robots.
 
-However, in real-world applications, we cannot rely on a single point of failure. If the central controller fails or communication with it is lost, the entire swarm can be affected.
+Teams of mobile robots map unknown indoor spaces faster than a single robot, and can keep working if one unit fails. But published multi-robot mapping systems depend on dense 2D LiDAR and a single-board Linux computer on every robot, which puts them out of reach of teaching laboratories and of applications where robots are expendable.
 
-Therefore, this project aims to develop a **decentralized swarm system with fault detection and recovery mechanisms**, where individual robots can communicate with neighboring robots, make local decisions, detect failures, and continue the mission collectively.
+This project therefore designs, builds and evaluates a team of low-cost differential-drive robots, each with only an ESP32, six single-zone ToF sensors, an IMU and wheel encoders, that explore a known-size indoor arena from **known starting poses**, while a laptop combines their data into one two-dimensional map. The problem includes determining, **by measurement and not by assumption**, how accurate such a map is and which sensing, odometry and algorithmic factors limit that accuracy.
 
 ---
 
