@@ -624,13 +624,58 @@ Add circuit diagram image here.
 
 ### Algorithm
 
-1. Start
-2. Initialize the system
-3. Read input from sensors/user
-4. Process the data
-5. Generate output/control action
-6. Display/store/transmit result
-7. Stop
+## 🔄 Flowchart & Algorithm
+
+The system operates through two interconnected algorithms: **Robot Firmware (ESP32)** and the **Laptop Processing Pipeline (ROS 2)**. The robot continuously collects sensor data, estimates its position, controls its motors and transmits information wirelessly. The laptop receives the data, processes sensor information, performs mapping and visualizes the results.
+
+### 1. General Flowchart
+
+The overall system follows these steps:
+
+1. **Start:** Begin system execution.
+2. **Initialize System:** Initialize the hardware, sensors, communication interfaces and software modules.
+3. **Read Input:** Acquire data from sensors or user commands.
+4. **Process Data:** Process sensor readings, calculate robot position and interpret incoming commands.
+5. **Generate Output / Control Action:** Generate motor-control signals or mapping results.
+6. **Display / Store / Transmit Result:** Display the results, store sensor data and transmit information between the AGV and laptop.
+7. **Stop:** Stop system execution or safely terminate operation.
+
+### 2. Robot Firmware Algorithm (ESP32)
+
+The ESP32 firmware manages sensor acquisition, robot localization, motor control and wireless communication.
+
+1. **Motor Safety Initialization:** Set all motor-driver inputs LOW to ensure the motors remain stopped during startup.
+2. **System Initialization:** Connect to Wi-Fi with Wi-Fi sleep disabled and initialize the six VL53L0X ToF sensors and MPU6050 IMU.
+3. **Gyroscope Calibration:** Calibrate the gyroscope bias during startup.
+4. **Sensor Acquisition:** Select each ToF sensor through the hub PCB, read its distance measurement and move to the next sensor.
+5. **Odometry Calculation:** Decode both wheel encoders and integrate gyroscope measurements to estimate the robot pose \((x, y, \theta)\).
+6. **PID Motor Control:** Execute PID control loops for wheel speed, turning angle and driving distance.
+7. **Wireless Data Transmission:** Transmit a 36-byte UDP data frame at 20 Hz. Stop the motors if no command is received within 500 ms.
+8. **Continuous Execution:** Repeat the sensing, processing, control and communication cycle.
+
+### 3. Laptop Processing Algorithm (ROS 2)
+
+The laptop processes the received AGV data and performs mapping and visualization.
+
+1. **UDP Data Reception:** Receive and decode incoming UDP frames. Store each frame as a CSV row with its sequence number and calculate packet loss using sequence-number gaps.
+2. **ROS 2 Bridge:** Publish robot odometry (`/robot_N/odom`), `ranges_mm`, individual `tof_I/range` topics, `scan_points` and TF transforms. Convert `/robot_N/cmd_vel` commands into wheel-control commands.
+3. **Scan Generation:** The scan builder converts sensor measurements into spatial scan points using the cone-based sensor model.
+4. **Scan Matching and Optimization:** Match consecutive scans using Correlative Scan Matching followed by ICP refinement. Add constraints to the pose graph and optimize the estimated robot trajectory.
+5. **Multi-Robot Mapping:** For multiple robots with known starting positions, add inter-robot constraints when their estimated poses are sufficiently close. Optimize the combined pose graph and render the merged map.
+
+### 4. Overall Algorithm Workflow
+
+**Start → Initialize → Sensor Acquisition → Data Processing → Odometry & PID Control → UDP Communication → ROS 2 Processing → Scan Generation → Scan Matching → Pose Graph Optimization → Map Visualization**
+
+For multiple AGVs, the optimized individual mapping information is combined through inter-robot pose constraints to produce a cooperative map.
+
+### 5. Safety and Communication Handling
+
+- All motor-driver inputs are initialized LOW during startup.
+- Wi-Fi sleep is disabled to support communication.
+- The ESP32 transmits sensor data at 20 Hz using UDP.
+- A 500 ms command timeout stops the motors when communication is interrupted.
+- UDP sequence numbers are used to identify missing data frames.
 
 ---
 
