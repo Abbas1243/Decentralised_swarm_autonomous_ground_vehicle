@@ -576,20 +576,19 @@ Where \(\phi\) is the robot's spin angle. Full 360° coverage requires a 240° s
 
 ---
 
-## Weekly Progress Updates
 
-Students must update this section every week.
+## 📅 Weekly Progress Updates
 
-| Week   | Date | Work Completed | Work Planned for Next Week | Issues / Challenges | GitHub Commit Link |
-| ------ | ---- | -------------- | -------------------------- | ------------------- | ------------------ |
-| Week 1 |      |                |                            |                     |                    |
-| Week 2 |      |                |                            |                     |                    |
-| Week 3 |      |                |                            |                     |                    |
-| Week 4 |      |                |                            |                     |                    |
-| Week 5 |      |                |                            |                     |                    |
-| Week 6 |      |                |                            |                     |                    |
-| Week 7 |      |                |                            |                     |                    |
-| Week 8 |      |                |                            |                     |                    |
+| Week | Date | Work Completed | Work Planned for Next Week | Issues / Challenges | GitHub Commit Link |
+|---|---|---|---|---|---|
+| **Week 1** | 08 February 2026 | Conducted literature survey on 2D SLAM, scan matching, collaborative SLAM and low-cost range sensing. Identified project objectives and limitations of existing hardware platforms. | Finalize project architecture and identify hardware and software requirements. | High computational requirements and cost of Raspberry Pi-based architecture; Milk-V Duo S performance limitations. | — |
+| **Week 2** | 15 March 2026 | Finalized ESP32-based AGV architecture. Studied sensor configurations, differential-drive mechanism and wireless communication requirements. | Prepare requirement specifications, acceptance criteria and project test plan. | Selecting suitable low-cost sensors and balancing sensing accuracy with hardware cost. | — |
+| **Week 3** | 12 April 2026 | Defined 13 functional requirements (R1–R13) and 12 validation tests (T1–T12). Finalized system design, sensor arrangement and UDP communication protocol. | Design custom ESP32 PCB, sensor hub PCB and mechanical mounting structure. | Sequential addressing of six VL53L0X sensors and I2C communication constraints. | — |
+| **Week 4** | 24 May 2026 | Developed the custom ESP32 PCB and hub PCB using 74HC138 decoder and 74HC04 inverter. Designed the six-sensor mounting arc and AGV mechanical structure. | Assemble AGV hardware and develop ESP32 firmware for sensor acquisition and motor control. | PCB integration, sensor selection and mechanical alignment. | — |
+| **Week 5** | 28 June 2026 | Integrated ESP32, six VL53L0X sensors, MPU6050, wheel encoders and N20 motors. Developed firmware for odometry, PID control and UDP communication. Implemented Python UDP receiver and CSV logger. | Integrate the ROS 2 bridge and test live sensor visualization and keyboard-based movement control. | Sensor initialization, Wi-Fi communication jitter and motor direction calibration. | — |
+| **Week 6** | 09 August 2026 | Integrated the AGV with Ubuntu and ROS 2 Humble. Implemented ROS 2 topics, odometry publishing and RViz2 visualization. Performed sensor calibration and PID tuning. | Evaluate scan generation, develop the cone sensor model and begin mapping algorithm implementation. | Heading drift, sparse sensor measurements and scan alignment accuracy. | — |
+| **Week 7** | 27 September 2026 | Developed Python-based scan builder, cone sensor model, scan matching and pose graph optimization modules. Evaluated the tinySLAM-style matcher using synthetic data. | Analyze simulation results, review system limitations and prepare project documentation and research paper. | Sparse ToF measurements, cone uncertainty and lack of real-robot mapping validation. | — |
+| **Week 8** | 01 November 2026 | Consolidated experimental results, analyzed performance against acceptance criteria and documented hardware, software, system architecture, methodology and limitations. Prepared final BE report and research paper. | Finalize GitHub repository, presentation and future development plan. | Real-data mapping and multi-robot map merging remain unvalidated. | — |
 
 ---
 
